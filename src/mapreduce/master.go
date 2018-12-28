@@ -12,7 +12,7 @@ import (
 
 // Master holds all the state that the master needs to keep track of.
 type Master struct {
-	sync.Mutex
+  sync.Mutex  // XXXD: embedded field declaration
 
 	address     string
 	doneChannel chan bool
