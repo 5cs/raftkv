@@ -71,7 +71,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
           args.NumOtherPhase = n_other
           ok := call(wk, "Worker.DoTask", args, new(struct{}))
           if ok == false {
-	          fmt.Printf("DoTask: RPC %s do task error\n", wk)
+	          // fmt.Printf("DoTask: RPC %s do task error\n", wk)
             mu.Lock()
             ids = append(ids, id)
             mu.Unlock()
