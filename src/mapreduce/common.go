@@ -7,6 +7,7 @@ import (
 
 // Debugging enabled?
 const debugEnabled = false
+
 // const debugEnabled = true
 
 // debug() will only print if debugEnabled is true
