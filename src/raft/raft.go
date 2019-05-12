@@ -86,6 +86,7 @@ type Raft struct {
 	nextIndex              []int
 	matchIndex             []int
 	refreshElectionTimeout chan struct{}
+	leaderToFollower       chan struct{}
 	timeOut                chan struct{}
 }
 
@@ -171,10 +172,10 @@ type RequestVoteReply struct {
 //
 func moreUpdateLog(args *RequestVoteArgs, rf *Raft) bool {
 	res := false
-	if rf.nextIndex[rf.me] == 1 {
+	if len(rf.log) == 0 {
 		res = true
-	} else if rf.nextIndex[rf.me] >= 2 {
-		iLastLogIndex := rf.nextIndex[rf.me] - 2
+	} else if len(rf.log) != 0 {
+		iLastLogIndex := len(rf.log) - 1
 		last := rf.log[iLastLogIndex]
 		if args.LastLogTerm > last.Term ||
 			(args.LastLogTerm == last.Term && args.LastLogIndex >= iLastLogIndex+1) {
@@ -205,6 +206,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	} else {
 		// grant it when request has more update logs
+		// currentTerm := rf.currentTerm
 		rf.currentTerm = args.Term
 		reply.Term = args.Term
 		if moreUpdateLog(args, rf) {
@@ -260,28 +262,50 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 	} else { // args.Term == rf.currentTerm (may candidate) || args.Term > rf.currentTerm
-		// currentTerm := rf.currentTerm
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
-		if rf.nextIndex[rf.me] == 1 {
+		if len(rf.log) == 0 {
 			reply.Success = true
-		} else if rf.nextIndex[rf.me] >= 2 {
-			iLastLogIndex := rf.nextIndex[rf.me] - 2
-			last := rf.log[iLastLogIndex]
-			if iLastLogIndex != args.PrevLogIndex {
+		} else if len(rf.log) != 0 && len(rf.log) < args.PrevLogIndex {
+			reply.Success = false
+		} else if len(rf.log) != 0 && len(rf.log) >= args.PrevLogIndex {
+			iPrevLogIndex := args.PrevLogIndex - 1
+			prevLog := rf.log[iPrevLogIndex]
+			if prevLog.Term != args.PrevLogTerm {
 				reply.Success = false
-			} else if iLastLogIndex == args.PrevLogIndex &&
-				last.Term != args.PrevLogTerm {
-				reply.Success = false
-			} else if iLastLogIndex == args.PrevLogIndex &&
-				last.Term == args.PrevLogTerm {
+			} else if prevLog.Term == args.PrevLogTerm {
 				reply.Success = true
 			} else {
 				log.Fatal("Can not happend!")
 			}
+			// truncate unmatch log entries
+			iCurLogIndex := args.PrevLogIndex
+			if len(args.Entries) != 0 &&
+				iCurLogIndex < len(rf.log) &&
+				args.Entries[0].Term != rf.log[iCurLogIndex].Term {
+				rf.log = rf.log[:iCurLogIndex]
+			}
 		} else {
 			log.Fatal("Can not happend!")
 		}
+
+		// update log state
+		if reply.Success {
+			// append entries
+			i, c := args.PrevLogIndex, 0
+			for i < len(rf.log) && c < len(args.Entries) {
+				i, c = i+1, c+1
+			}
+			rf.log = append(rf.log, args.Entries[c:]...)
+			// update commitIndex
+			iLastLogIndex := len(rf.log) - 1
+			if args.LeaderCommit < iLastLogIndex+1 {
+				rf.commitIndex = args.LeaderCommit
+			} else {
+				rf.commitIndex = iLastLogIndex + 1
+			}
+		}
+
 		if rf.state == LEADER || rf.state == CANDIDATE {
 			rf.state = FOLLOWER
 		}
@@ -530,9 +554,6 @@ func (rf *Raft) candidateLoop(args RequestVoteArgs) int {
 	}
 	if pros*2 > len(rf.peers) {
 		state = LEADER
-		rf.mu.Lock()
-		log.Println(rf.me, "become leader with votes from", ll, "at term", rf.currentTerm)
-		rf.mu.Unlock()
 	} else if cons*2 > len(rf.peers) {
 		state = FOLLOWER
 	}
@@ -547,6 +568,13 @@ func (rf *Raft) candidateLoop(args RequestVoteArgs) int {
 //
 func (rf *Raft) leaderLoop() bool {
 
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = len(rf.log) + 1
+		rf.matchIndex[i] = 0
+	}
+
 	leaderToFollower := make(chan struct{})
 
 	for i := range rf.peers {
@@ -558,25 +586,35 @@ func (rf *Raft) leaderLoop() bool {
 			rf.mu.Lock()
 			currentTerm := rf.currentTerm
 			rf.mu.Unlock()
-			for {
-				args := AppendEntryArgs{}
-				args.Term = currentTerm
-				args.LeaderId = rf.me
-				if rf.nextIndex[rf.me] == 1 {
-					args.PrevLogTerm = 0
-					args.PrevLogIndex = 0
-				} else {
-					iLastLogIndex := rf.nextIndex[rf.me] - 2
-					last := rf.log[iLastLogIndex]
-					args.PrevLogTerm = last.Term
-					args.PrevLogIndex = iLastLogIndex + 1
-				}
-				// args.LeaderCommit = args.PrevLogIndex
 
+			for {
 				// sent heartbeat periodically in async mode
 				go func() {
+					args := AppendEntryArgs{}
+					args.Term = currentTerm
+					args.LeaderId = rf.me
+					args.LeaderCommit = rf.commitIndex
+
+					if rf.nextIndex[i] == 1 {
+						args.PrevLogTerm = 0
+						args.PrevLogIndex = 0
+					} else if rf.nextIndex[i] >= 2 {
+						iPrevLogIndex := rf.nextIndex[i] - 2
+						prevLog := rf.log[iPrevLogIndex]
+						args.PrevLogTerm = prevLog.Term
+						args.PrevLogIndex = iPrevLogIndex + 1
+					} else {
+						log.Fatal("Can not happend!")
+					}
+					// each RPC send 1 log entry
+					if rf.nextIndex[i] < rf.nextIndex[rf.me] {
+						args.Entries = make([]LogEntry, 0)
+						args.Entries = append(args.Entries, rf.log[rf.nextIndex[i]-1])
+					}
+
 					reply := AppendEntryReply{}
-					ok := rf.sendAppendEntries(i, &args, &reply)
+					// ok := rf.sendAppendEntries(i, &args, &reply)
+					rf.sendAppendEntries(i, &args, &reply)
 					if !reply.Success && reply.Term > currentTerm { // find higher term, transits to follower
 						rf.mu.Lock()
 						if rf.state == LEADER && rf.currentTerm < reply.Term {
@@ -584,8 +622,16 @@ func (rf *Raft) leaderLoop() bool {
 							rf.state = FOLLOWER
 						}
 						rf.mu.Unlock()
-					} else if ok || !ok {
-
+					} else {
+						// consistency check
+						if reply.Success {
+							rf.nextIndex[i] += len(args.Entries)
+							rf.matchIndex[i] += len(args.Entries)
+						} else if reply.Term == currentTerm {
+							rf.nextIndex[i] -= 1
+						} else {
+							// {0, false}
+						}
 					}
 				}()
 
@@ -642,16 +688,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.nextIndex = make([]int, len(peers))
-	for i := range rf.nextIndex {
-		rf.nextIndex[i] = 1
-	}
 	rf.refreshElectionTimeout = make(chan struct{}, 1)
 
 	rf.state = FOLLOWER
 	rf.votedFor = -1
-	rf.timeOut = make(chan struct{})
-
+	rf.timeOut = make(chan struct{}, 0)
 	go func() {
 		for {
 
@@ -665,11 +706,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			args := RequestVoteArgs{}
 			args.Term = rf.currentTerm
 			args.CandidateId = rf.me
-			if rf.nextIndex[rf.me] == 1 {
+			if len(rf.log) == 0 {
 				args.LastLogTerm = 0
 				args.LastLogIndex = 0
-			} else if rf.nextIndex[rf.me] >= 2 {
-				iLastLogIndex := rf.nextIndex[rf.me] - 2
+			} else if len(rf.log) != 0 {
+				iLastLogIndex := len(rf.log) - 1
 				last := rf.log[iLastLogIndex]
 				args.LastLogTerm = last.Term
 				args.LastLogIndex = iLastLogIndex + 1
@@ -685,6 +726,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			if rf.state == LEADER {
 				rf.mu.Unlock()
 				rf.leaderLoop()
+				// ok := rf.leaderLoop()
 			} else if rf.state == FOLLOWER {
 				rf.mu.Unlock()
 			} else if state == CANDIDATE {
