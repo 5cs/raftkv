@@ -613,6 +613,7 @@ func (rf *Raft) leaderLoop() bool {
 				// killed, transit to follower
 				rf.mu.Lock()
 				if rf.killed == true {
+					rf.mu.Unlock()
 					break
 				}
 				rf.mu.Unlock()
@@ -781,6 +782,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 			// killed
 			if rf.killed == true {
+				rf.mu.Unlock()
 				break
 			}
 
