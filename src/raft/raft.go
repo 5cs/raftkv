@@ -207,7 +207,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	} else {
 		// grant it when request has more update logs
-		// currentTerm := rf.currentTerm
+		currentTerm := rf.currentTerm
 		rf.currentTerm = args.Term
 		reply.Term = args.Term
 		if moreUpdateLog(args, rf) {
