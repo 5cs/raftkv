@@ -219,6 +219,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		} else {
 			rf.votedFor = -1
 			reply.VoteGranted = false
+			if currentTerm < args.Term && (rf.state == LEADER || rf.state == CANDIDATE) {
+				rf.state = FOLLOWER
+			}
 		}
 	}
 
@@ -307,7 +310,8 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 				rf.commitIndex = iLastLogIndex + 1
 			}
 			for k := N + 1; k <= rf.commitIndex; k++ {
-				applyMsg := ApplyMsg{CommandValid: true,
+				applyMsg := ApplyMsg{
+					CommandValid: true,
 					Command:      rf.log[k-1].Command,
 					CommandIndex: k,
 				}
@@ -542,7 +546,8 @@ func (rf *Raft) candidateLoop(args RequestVoteArgs) int {
 			}
 
 			rf.mu.Lock()
-			if rf.state == FOLLOWER { // transit to follower state
+			// if rf.state == FOLLOWER { // transit to follower state
+			if rf.state == FOLLOWER && rf.currentTerm == args.Term { // transit to follower state
 				rf.mu.Unlock()
 				candidateToFollower <- struct{}{}
 			} else if rf.state == LEADER {
@@ -676,7 +681,8 @@ func (rf *Raft) leaderLoop() bool {
 								}
 								if has*2 > len(rf.peers) {
 									for k := rf.commitIndex + 1; k <= N; k++ {
-										applyMsg := ApplyMsg{CommandValid: true,
+										applyMsg := ApplyMsg{
+											CommandValid: true,
 											Command:      rf.log[k-1].Command,
 											CommandIndex: k,
 										}
