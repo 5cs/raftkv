@@ -3,11 +3,16 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import "math/big"
-
+import "sync"
+import "time"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu     sync.Mutex
+	id     int64
+	seq    int64
+	leader int
 }
 
 func nrand() int64 {
@@ -21,6 +26,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.id, ck.seq = nrand(), 0
 	return ck
 }
 
@@ -37,9 +43,37 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	ck.mu.Lock()
+	ck.seq += 1
+	getArgs := GetArgs{Key: key, ClientId: ck.id, Seq: ck.seq}
+	ck.mu.Unlock()
+	done := make(chan GetReply, 0)
+	go ck.tryGet(done, &getArgs)
+	for {
+		select {
+		case <-time.After(time.Duration(500 * time.Millisecond)):
+			ck.mu.Lock()
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			ck.mu.Unlock()
+			go ck.tryGet(done, &getArgs)
+		case reply := <-done:
+			return reply.Value
+		}
+	}
+}
+
+func (ck *Clerk) tryGet(done chan GetReply, args *GetArgs) {
+	reply := &GetReply{}
+	ck.servers[ck.leader].Call("KVServer.Get", args, reply)
+	if reply.Err == OK || reply.Err == ErrNoKey {
+		done <- *reply
+	} else if reply.WrongLeader {
+		ck.mu.Lock()
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+		ck.mu.Unlock()
+		go ck.tryGet(done, args)
+	}
 }
 
 //
@@ -54,6 +88,41 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.mu.Lock()
+	ck.seq += 1
+	putAppendArgs := PutAppendArgs{
+		Key: key, Value: value, Op: op,
+		ClientId: ck.id, Seq: ck.seq,
+	}
+	ck.mu.Unlock()
+
+	done := make(chan struct{}, 0)
+	go ck.tryPutAppend(done, &putAppendArgs)
+loop:
+	for {
+		select {
+		case <-time.After(time.Duration(500 * time.Millisecond)):
+			ck.mu.Lock()
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			ck.mu.Unlock()
+			go ck.tryPutAppend(done, &putAppendArgs)
+		case <-done:
+			break loop
+		}
+	}
+}
+
+func (ck *Clerk) tryPutAppend(done chan struct{}, args *PutAppendArgs) {
+	reply := &PutAppendReply{}
+	ck.servers[ck.leader].Call("KVServer.PutAppend", args, reply)
+	if reply.Err == OK || reply.Err == ErrNoKey {
+		done <- struct{}{}
+	} else if reply.WrongLeader {
+		ck.mu.Lock()
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+		ck.mu.Unlock()
+		go ck.tryPutAppend(done, args)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

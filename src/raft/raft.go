@@ -27,6 +27,8 @@ import "log"
 import "bytes"
 import "labgob"
 
+import "helper"
+
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -89,6 +91,7 @@ type Raft struct {
 	timeOut                chan struct{}
 	applyCh                chan ApplyMsg
 	killed                 bool
+	app                    helper.Applier // upper app
 }
 
 // return currentTerm and whether this server
@@ -106,6 +109,15 @@ func (rf *Raft) GetState() (int, bool) {
 	}
 	rf.mu.Unlock()
 	return term, isleader
+}
+
+// Attach raft instance with upper applier App
+func (rf *Raft) SetApp(app helper.Applier) {
+	rf.app = app
+}
+
+func (rf *Raft) GetLog() []LogEntry {
+	return rf.log
 }
 
 //
@@ -350,6 +362,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 				}
 				log.Println("Apply at append entries", rf.me, applyMsg)
 				rf.applyCh <- applyMsg
+				// rf.app.Apply(k, rf.log[k-1].Command) // apply
 			}
 		}
 
@@ -446,6 +459,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.nextIndex[rf.me] += 1
 		rf.matchIndex[rf.me] = len(rf.log)
 		log.Println("Start at", rf.me, "term", term, "index", index, "command", command)
+		log.Printf("Command is: %#v\n", command)
 		rf.persist()
 	}
 	rf.mu.Unlock()
@@ -730,7 +744,8 @@ func (rf *Raft) leaderLoop() bool {
 											CommandIndex: k,
 										}
 										log.Println("Apply at leader loop", rf.me, applyMsg)
-										rf.applyCh <- applyMsg
+										// rf.applyCh <- applyMsg
+										rf.app.Apply(k, rf.log[k-1].Command) // apply
 									}
 									rf.commitIndex = N
 									log.Println("New commitIndex", tmp, " -> ", N, rf.log[rf.commitIndex-1])
@@ -738,7 +753,9 @@ func (rf *Raft) leaderLoop() bool {
 							}
 						} else if reply.Term == currentTerm &&
 							rf.nextIndex[i]-1 == args.PrevLogIndex {
-							if reply.ConflictIndex != 0 {
+							if reply.ConflictIndex == 0 {
+								// rf.nextIndex[i] = 1
+							} else {
 								rf.nextIndex[i] = reply.ConflictIndex
 							}
 						} else {
@@ -794,8 +811,8 @@ func (rf *Raft) leaderLoop() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	// log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.SetFlags(log.LstdFlags | log.Llongfile | log.Lmicroseconds)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	// log.SetFlags(log.LstdFlags | log.Llongfile | log.Lmicroseconds)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
