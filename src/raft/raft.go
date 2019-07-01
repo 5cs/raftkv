@@ -680,6 +680,10 @@ func (rf *Raft) leaderLoop() bool {
 				go func() {
 
 					rf.mu.Lock()
+					if rf.state != LEADER {
+						rf.mu.Unlock()
+						return
+					}
 
 					args := AppendEntryArgs{}
 					args.Term = currentTerm
@@ -720,6 +724,10 @@ func (rf *Raft) leaderLoop() bool {
 					} else {
 						// consistency check
 						rf.mu.Lock()
+						if rf.state != LEADER {
+							rf.mu.Unlock()
+							return
+						}
 						if reply.Success &&
 							currentTerm == rf.currentTerm &&
 							rf.nextIndex[i]-1 == args.PrevLogIndex {

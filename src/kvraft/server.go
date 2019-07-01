@@ -38,12 +38,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	persister         *raft.Persister
-	clientSeqs        map[int64]int64
-	clientPendingSeqs map[int64]int64
-	getNotice         map[int]*sync.Cond
-	putAppendNotice   map[int]*sync.Cond
-	appliedCmds       map[int]*appliedResult
+	persister       *raft.Persister
+	clientSeqs      map[int64]int64
+	getNotice       map[int]*sync.Cond
+	putAppendNotice map[int]*sync.Cond
+	appliedCmds     map[int]*appliedResult
 }
 
 type appliedResult struct {
@@ -100,11 +99,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return // applied
 	}
-	if pSeq, ok := kv.clientPendingSeqs[args.ClientId]; ok && args.Seq <= pSeq {
-		kv.mu.Unlock()
-		return // make client re-send request
-	}
-	kv.clientPendingSeqs[args.ClientId] = args.Seq
 	kv.mu.Unlock()
 	cmd := *args
 	for {
@@ -275,7 +269,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 	kv.rf.SetApp(kv)
 	kv.clientSeqs = make(map[int64]int64)
-	kv.clientPendingSeqs = make(map[int64]int64)
 	kv.getNotice = make(map[int]*sync.Cond)
 	kv.putAppendNotice = make(map[int]*sync.Cond)
 	kv.appliedCmds = make(map[int]*appliedResult)
