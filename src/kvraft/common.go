@@ -42,3 +42,8 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ClientSeq struct {
+	ClientId int64
+	Seq      int64
+}
