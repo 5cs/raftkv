@@ -415,6 +415,7 @@ type InstallSnapshotReply struct {
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	DPrintf("RPC:InstallSnapshot Callee id: %v term: %v Caller id: %v term: %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 	defer DPrintf("=RPC:InstallSnapshot Callee id: %v term: %v Caller id: %v term: %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
+
 	rf.mu.Lock()
 
 	if args.Term < rf.currentTerm {
@@ -562,10 +563,12 @@ func stateName(state int) string {
 	}
 }
 
+// hold rf.mu
 func (rf *Raft) Len() int {
 	return len(rf.log) + rf.lastExcludedIndex
 }
 
+// hold rf.mu
 func (rf *Raft) Index(in int) int {
 	return in - rf.lastExcludedIndex - 1
 }
@@ -943,7 +946,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.mu.Unlock()
 				break
 			}
-
 			rf.mu.Unlock()
 
 			state := rf.candidateLoop(args)

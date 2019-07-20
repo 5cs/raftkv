@@ -266,11 +266,13 @@ func (kv *KVServer) trySnapshot(index int) {
 	}
 	kv.lastIncludedIndex = index
 	kv.lastIncludedTerm = logs[kv.rf.Index(index)].Term
+	// persist snapshot and raft state
 	kv.persist(kvsSnapshot, seqsSnapshot)
 	kv.rf.Persist(index)
 	return
 }
 
+// hold kv.mu
 func (kv *KVServer) persist(kvsSnapshot []*KeyValue, seqsSnapshot []*ClientSeq) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -282,7 +284,7 @@ func (kv *KVServer) persist(kvsSnapshot []*KeyValue, seqsSnapshot []*ClientSeq) 
 	kv.persister.SaveSnapshot(data)
 }
 
-// execute raft's command, get value
+// execute raft's command, get value; hold kv.mu
 func (kv *KVServer) getValue(key string, index int) (string, Err) {
 	var (
 		value string
