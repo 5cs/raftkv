@@ -105,6 +105,10 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == LEADER
 }
 
+func (rf *Raft) GetStateNoLock() (int, bool) {
+	return rf.currentTerm, rf.state == LEADER
+}
+
 // Attach raft instance with upper applier App
 func (rf *Raft) SetApp(app helper.Applier) {
 	rf.app = app

@@ -92,7 +92,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 			ck.mu.Lock()
 			ck.leader = (ck.leader + 1) % len(ck.servers)
 			ck.mu.Unlock()
-			ck.tryJoin(done, args)
+			go ck.tryJoin(done, args)
 		case <-done:
 			return
 		}
