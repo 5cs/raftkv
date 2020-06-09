@@ -28,6 +28,7 @@ import "bytes"
 import "labgob"
 
 import "helper"
+import "fmt"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -96,6 +97,10 @@ type Raft struct {
 	lastExcludedTerm       int
 }
 
+func (rf *Raft) GetRaftInstanceName() string {
+	return fmt.Sprintf("%v", rf.me)
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -112,6 +117,12 @@ func (rf *Raft) SetApp(app helper.Applier) {
 
 func (rf *Raft) GetLog() []LogEntry {
 	return rf.log
+}
+
+func (rf *Raft) GetCommitIndex() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.commitIndex
 }
 
 func (rf *Raft) Persist(i int) {
@@ -426,6 +437,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.currentTerm = args.Term
 	reply.Term = rf.currentTerm
 
+	//if rf.lastExcludedIndex >= args.LastIncludedIndex {
+	//	return
+	//}
+
 	if index := rf.Index(args.LastIncludedIndex); index >= 0 &&
 		index < len(rf.log) && rf.log[index].Term == args.LastIncludedTerm {
 		rf.log = rf.log[index+1:]
@@ -438,6 +453,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.persist()
 	if rf.state == LEADER || rf.state == CANDIDATE {
 		rf.state = FOLLOWER
+	}
+	if rf.app != nil {
+		rf.app.Apply(-1, args.Data, rf.state == LEADER)
 	}
 	if rf.state != LEADER {
 		rf.mu.Unlock()
@@ -493,6 +511,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryArgs, reply *Appe
 // sendInstallSnapshot
 //
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	var (
+		lastIncludedIndex int = 0
+		lastIncludedTerm  int = 0
+	)
+	keyValueStore := make(map[string]string)
+	clientSeqs := make(map[int64]int64)
+	r := bytes.NewBuffer(args.Data)
+	d := labgob.NewDecoder(r)
+	d.Decode(&lastIncludedIndex)
+	d.Decode(&lastIncludedTerm)
+	d.Decode(&clientSeqs)
+	d.Decode(&keyValueStore)
+	log.Printf("send install snapshot from %#v to %#v with kv: %#v\n", rf.me, server, keyValueStore)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
@@ -954,6 +985,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.state = state
 			if rf.state == LEADER {
 				rf.mu.Unlock()
+				log.Printf("RAFT leader at %#v is %#v\n", rf.currentTerm, rf.me)
 				rf.leaderLoop()
 			} else {
 				rf.mu.Unlock()
