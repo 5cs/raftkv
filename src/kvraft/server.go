@@ -42,8 +42,7 @@ type KVServer struct {
 	persister         *raft.Persister
 	db                map[string]string
 	clientSeqs        map[int64]int64
-	getNotice         map[int]*sync.Cond
-	putAppendNotice   map[int]*sync.Cond
+	notices           map[int]*sync.Cond
 	appliedCmds       map[int]*appliedResult
 	lastIncludedIndex int
 	lastIncludedTerm  int
@@ -80,10 +79,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		}
 
 		kv.mu.Lock()
-		if _, ok := kv.getNotice[index]; !ok {
-			kv.getNotice[index] = sync.NewCond(&kv.mu)
+		if _, ok := kv.notices[index]; !ok {
+			kv.notices[index] = sync.NewCond(&kv.mu)
 		}
-		kv.getNotice[index].Wait()
+		kv.notices[index].Wait()
 
 		ret := kv.appliedCmds[index]
 		k := getFmtKey(&cmd)
@@ -123,10 +122,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 
 		kv.mu.Lock()
-		if _, ok := kv.putAppendNotice[index]; !ok {
-			kv.putAppendNotice[index] = sync.NewCond(&kv.mu)
+		if _, ok := kv.notices[index]; !ok {
+			kv.notices[index] = sync.NewCond(&kv.mu)
 		}
-		kv.putAppendNotice[index].Wait()
+		kv.notices[index].Wait()
 
 		ret := kv.appliedCmds[index]
 		k := putAppendFmtKey(&cmd)
@@ -169,28 +168,28 @@ func (kv *KVServer) Apply(applyMsg interface{}) {
 			break
 		}
 		args := cmd.(GetArgs)
-		reply := kv.getValue(&args, index, isLeader)
+		reply := kv.get(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{
 			Key:    getFmtKey(&args),
 			Result: reply,
 		}
-		if _, ok := kv.getNotice[index]; ok {
+		if _, ok := kv.notices[index]; ok {
 			kv.mu.Unlock()
-			kv.getNotice[index].Broadcast()
+			kv.notices[index].Broadcast()
 		} else {
 			kv.mu.Unlock()
 		}
 	case PutAppendArgs:
 		kv.trySnapshot(index)
 		args := cmd.(PutAppendArgs)
-		reply := kv.putAppendValue(&args, index, isLeader)
+		reply := kv.putAppend(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{
 			Key:    putAppendFmtKey(&args),
 			Result: reply,
 		}
-		if _, ok := kv.putAppendNotice[index]; ok {
+		if _, ok := kv.notices[index]; ok {
 			kv.mu.Unlock()
-			kv.putAppendNotice[index].Broadcast()
+			kv.notices[index].Broadcast()
 		} else {
 			kv.mu.Unlock()
 		}
@@ -286,7 +285,7 @@ func (kv *KVServer) readSnapshot(data []byte) {
 	kv.lastIncludedTerm = lastIncludedTerm
 }
 
-func (kv *KVServer) putAppendValue(args *PutAppendArgs, index int, isLeader bool) PutAppendReply {
+func (kv *KVServer) putAppend(args *PutAppendArgs, index int, isLeader bool) PutAppendReply {
 	if seq, ok := kv.clientSeqs[args.ClientId]; ok && seq >= args.Seq {
 		DPrintf("Op %#v at %#v, key:%#v, value:%#v, client:%#v, seq:%#v, original:%#v, clientId-seq-index:%#v-%#v-%#v, %#v, filtered by %#v\n",
 			args.Op, kv.rf.GetRaftInstanceName(), args.Key, args.Value, args.ClientId, args.Seq, kv.db[args.Key], args.ClientId, args.Seq, index, isLeader, seq)
@@ -303,7 +302,7 @@ func (kv *KVServer) putAppendValue(args *PutAppendArgs, index int, isLeader bool
 	return PutAppendReply{Err: OK}
 }
 
-func (kv *KVServer) getValue(args *GetArgs, index int, isLeader bool) GetReply {
+func (kv *KVServer) get(args *GetArgs, index int, isLeader bool) GetReply {
 	if value, ok := kv.db[args.Key]; !ok {
 		return GetReply{Value: "", Err: ErrNoKey}
 	} else {
@@ -350,8 +349,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf.SetApp(kv)
 	kv.db = make(map[string]string)
 	kv.clientSeqs = make(map[int64]int64)
-	kv.getNotice = make(map[int]*sync.Cond)
-	kv.putAppendNotice = make(map[int]*sync.Cond)
+	kv.notices = make(map[int]*sync.Cond)
 	kv.appliedCmds = make(map[int]*appliedResult)
 	kv.readSnapshot(kv.persister.ReadSnapshot())
 	kv.restart = true

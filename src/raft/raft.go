@@ -22,6 +22,7 @@ import "fmt"
 import "log"
 import "math/rand"
 import "sync"
+import "sync/atomic"
 import "time"
 
 import "labrpc"
@@ -59,12 +60,12 @@ const (
 )
 
 const (
-	START           = 300
-	LENGTH          = 100
-	RPCDUE          = 50
-	RPCDULENGTH     = 10
-	HEARTBEAT       = 50
-	HEARTBEATLENGTH = 10
+	ElectionTimeOut       = 300
+	ElectionTimeOutLength = 100
+	RpcDue                = 50
+	RpcDueLength          = 10
+	Heartbeat             = 50
+	HeatbeatLength        = 10
 )
 
 //
@@ -586,81 +587,56 @@ func (rf *Raft) Kill() {
 	rf.killed = true
 }
 
-func stateName(state int) string {
-	if state == FOLLOWER {
-		return "follower"
-	} else if state == CANDIDATE {
-		return "candidate"
-	} else if state == LEADER {
-		return "leader"
-	} else {
-		return "?????"
-	}
+func (rf *Raft) isKilled() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.killed
 }
 
-// hold rf.mu
+// Hold rf.mu
 func (rf *Raft) Len() int {
 	return len(rf.log) + rf.lastExcludedIndex
 }
 
-// hold rf.mu
+// Hold rf.mu
 func (rf *Raft) Index(in int) int {
 	return in - rf.lastExcludedIndex - 1
+}
+
+// Start timer for follower or candidate
+func (rf *Raft) startTimer(timeOut chan struct{}) {
+	var raftElectionTimeout int = ElectionTimeOut + rand.Intn(ElectionTimeOutLength)
+loop:
+	for {
+		select {
+		case <-rf.refreshElectionTimeout:
+			raftElectionTimeout = ElectionTimeOut + rand.Intn(ElectionTimeOutLength)
+		case <-time.After(time.Duration(raftElectionTimeout) * time.Millisecond):
+			rf.mu.Lock()
+			if rf.state != LEADER {
+				rf.mu.Unlock()
+				select {
+				case timeOut <- struct{}{}:
+				default:
+				}
+			} else {
+				rf.mu.Unlock()
+			}
+			break loop
+		}
+	}
 }
 
 //
 // Follower loop and timer for candidate
 //
 func (rf *Raft) followerLoop(timeOut chan struct{}) {
-	// reset election timeout
-	var raftElectionTimeout int = START + rand.Intn(LENGTH)
-	go func() {
-	loopTimeOut:
-		for {
-			select {
-			case <-rf.refreshElectionTimeout:
-				raftElectionTimeout = START + rand.Intn(LENGTH)
-			case <-time.After(time.Duration(raftElectionTimeout) * time.Millisecond):
-				rf.mu.Lock()
-				if rf.state != LEADER {
-					rf.mu.Unlock()
-					select {
-					case timeOut <- struct{}{}:
-					default:
-					}
-				} else {
-					rf.mu.Unlock()
-				}
-				break loopTimeOut
-			}
-		}
-	}()
+	go rf.startTimer(timeOut) // timer for follower or candidate
 	rf.mu.Lock()
 	if rf.state == FOLLOWER {
 		rf.mu.Unlock()
-		<-timeOut // drain channel, let timeOut kick again
-		var raftElectionTimeout1 int = START + rand.Intn(LENGTH)
-		go func() { // timer for candidate
-		loopTimeOut1:
-			for {
-				select {
-				case <-rf.refreshElectionTimeout:
-					raftElectionTimeout1 = START + rand.Intn(LENGTH)
-				case <-time.After(time.Duration(raftElectionTimeout1) * time.Millisecond):
-					rf.mu.Lock()
-					if rf.state != LEADER {
-						rf.mu.Unlock()
-						select {
-						case timeOut <- struct{}{}:
-						default:
-						}
-					} else {
-						rf.mu.Unlock()
-					}
-					break loopTimeOut1
-				}
-			}
-		}()
+		<-timeOut                 // waiting for follower to become candidate
+		go rf.startTimer(timeOut) // timer for candidate
 	} else {
 		rf.mu.Unlock()
 	}
@@ -669,10 +645,34 @@ func (rf *Raft) followerLoop(timeOut chan struct{}) {
 //
 // Candidate loop
 //
-func (rf *Raft) candidateLoop(args RequestVoteArgs, timeOut chan struct{}) int {
+func (rf *Raft) candidateLoop(timeOut chan struct{}) int {
+	// Prepare RequestVote RPC parameters
+	rf.mu.Lock()
+	rf.state = CANDIDATE
+	rf.currentTerm += 1
+	rf.votedFor = rf.me
+	rf.persist() // persist state
+	args := RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+	}
+	if rf.Len() == 0 {
+		args.LastLogTerm = 0
+		args.LastLogIndex = 0
+	} else if rf.Len() != 0 {
+		args.LastLogTerm = rf.lastExcludedTerm
+		args.LastLogIndex = rf.Len()
+		if rf.Index(rf.Len()) != -1 {
+			args.LastLogTerm = rf.log[rf.Index(rf.Len())].Term
+		}
+	} else {
+		panic("Can't happen!")
+	}
+	rf.mu.Unlock()
+
 	currentTerm := args.Term
-	granted := make(chan struct{}, 1)
-	rejected := make(chan struct{}, 1)
+	grant := make(chan struct{}, 1)
+	reject := make(chan struct{}, 1)
 	candidateToFollower := make(chan struct{}, len(rf.peers))
 	done := make([]bool, len(rf.peers))
 	for i := range rf.peers {
@@ -680,29 +680,29 @@ func (rf *Raft) candidateLoop(args RequestVoteArgs, timeOut chan struct{}) int {
 			continue
 		}
 		go func(i int) {
+			shouldLeaveCandidateLoop := func() bool {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				return rf.state != CANDIDATE || rf.currentTerm != currentTerm || done[i]
+			}
 			// send request vote to other server
 			for {
-
-				rf.mu.Lock()
-				if rf.state != CANDIDATE || currentTerm != rf.currentTerm || done[i] {
-					rf.mu.Unlock()
+				if shouldLeaveCandidateLoop() {
 					break
 				}
-				rf.mu.Unlock()
 
 				go func() {
 					reply := RequestVoteReply{}
 					ok := rf.sendRequestVote(i, &args, &reply)
 
-					rf.mu.Lock()
-					if done[i] {
-						rf.mu.Unlock()
+					if shouldLeaveCandidateLoop() {
 						return
 					}
+					rf.mu.Lock()
 					if ok && reply.VoteGranted && currentTerm == rf.currentTerm {
 						done[i] = true
 						rf.mu.Unlock()
-						granted <- struct{}{}
+						grant <- struct{}{}
 					} else if ok && !reply.VoteGranted && currentTerm == rf.currentTerm {
 						done[i] = true
 						if reply.Term > rf.currentTerm { // discover newer term
@@ -711,7 +711,7 @@ func (rf *Raft) candidateLoop(args RequestVoteArgs, timeOut chan struct{}) int {
 							rf.mu.Unlock()
 						} else { // server i voted to other candidate at this term
 							rf.mu.Unlock()
-							rejected <- struct{}{}
+							reject <- struct{}{}
 						}
 					} else {
 						// invalid response
@@ -719,12 +719,12 @@ func (rf *Raft) candidateLoop(args RequestVoteArgs, timeOut chan struct{}) int {
 					}
 				}()
 
-				time.Sleep(time.Duration(RPCDUE+rand.Intn(RPCDULENGTH)) * time.Millisecond)
+				time.Sleep(time.Duration(RpcDue+rand.Intn(RpcDueLength)) * time.Millisecond)
 			}
 
 			rf.mu.Lock()
-			// transit to follower state
 			if rf.state == FOLLOWER && rf.currentTerm == currentTerm {
+				// transit to follower state
 				rf.mu.Unlock()
 				candidateToFollower <- struct{}{}
 			} else if rf.state == LEADER {
@@ -735,30 +735,36 @@ func (rf *Raft) candidateLoop(args RequestVoteArgs, timeOut chan struct{}) int {
 		}(i)
 	}
 
-	var state, pros, cons int = -1, 1, 0
+	var (
+		yes                   int  = 1
+		no                    int  = 0
+		isCandidateToFollower bool = false
+		isTimeOut             bool = false
+	)
 	for {
 		select {
-		case <-granted:
-			pros += 1
-		case <-rejected:
-			cons += 1
+		case <-grant:
+			yes += 1
+		case <-reject:
+			no += 1
 		case <-candidateToFollower:
-			state = FOLLOWER
-		case <-timeOut:
-			state = CANDIDATE
+			isCandidateToFollower = true
+		case <-timeOut: // waiting for candidate to become new candidate
+			isTimeOut = true
 		}
-		if pros*2 > len(rf.peers) || cons*2 > len(rf.peers) ||
-			state == FOLLOWER || state == CANDIDATE {
-			break
+		if yes*2 > len(rf.peers) {
+			return LEADER
+		}
+		if no*2 > len(rf.peers) {
+			return FOLLOWER
+		}
+		if isCandidateToFollower {
+			return FOLLOWER
+		}
+		if isTimeOut {
+			return CANDIDATE
 		}
 	}
-	if pros*2 > len(rf.peers) {
-		state = LEADER
-	} else if cons*2 > len(rf.peers) {
-		state = FOLLOWER
-	}
-
-	return state
 }
 
 //
@@ -769,6 +775,7 @@ func (rf *Raft) candidateLoop(args RequestVoteArgs, timeOut chan struct{}) int {
 func (rf *Raft) leaderLoop() {
 
 	rf.mu.Lock()
+	currentTerm := rf.currentTerm
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i := range rf.nextIndex {
@@ -777,11 +784,11 @@ func (rf *Raft) leaderLoop() {
 	}
 	type LeaveLeaderLoopChan struct {
 		leaderToFollower chan struct{}
-		isFollower       bool
+		isFollower       int32
 	}
 	leaveLeaderLoopChan := LeaveLeaderLoopChan{
 		leaderToFollower: make(chan struct{}),
-		isFollower:       false,
+		isFollower:       0,
 	}
 	rf.mu.Unlock()
 
@@ -791,31 +798,27 @@ func (rf *Raft) leaderLoop() {
 		}
 
 		go func(i int) {
-			rf.mu.Lock()
-			currentTerm := rf.currentTerm
-			rf.mu.Unlock()
+			shouldLeaveLeaderLoop := func() bool {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				return rf.killed || rf.state != LEADER || rf.currentTerm != currentTerm
+			}
 
 			for {
-
-				rf.mu.Lock()
-				if rf.killed || rf.state != LEADER || rf.currentTerm != currentTerm {
-					rf.mu.Unlock()
+				if shouldLeaveLeaderLoop() {
 					break
 				}
-				rf.mu.Unlock()
 
 				// sent heartbeat periodically in async mode
 				go func() {
-
-					rf.mu.Lock()
-					if rf.killed || rf.state != LEADER || rf.currentTerm != currentTerm {
-						rf.mu.Unlock()
+					if shouldLeaveLeaderLoop() {
 						return
 					}
 
-					// I don't have the log you want, install snapshot
+					rf.mu.Lock()
 					tmpNextIndex := rf.Index(rf.nextIndex[i])
 					if tmpNextIndex < 0 {
+						// I don't have the log you want, install snapshot
 						installSnapshotArgs := &InstallSnapshotArgs{}
 						installSnapshotReply := &InstallSnapshotReply{}
 						installSnapshotArgs.Term = currentTerm
@@ -866,12 +869,10 @@ func (rf *Raft) leaderLoop() {
 					reply := &AppendEntryReply{}
 					rf.sendAppendEntries(i, args, reply)
 
-					rf.mu.Lock()
-					if rf.killed || rf.state != LEADER || rf.currentTerm != currentTerm {
-						rf.mu.Unlock()
+					if shouldLeaveLeaderLoop() {
 						return
 					}
-					// find higher term, transit to follower
+					rf.mu.Lock()
 					if !reply.Success && reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.state = FOLLOWER
@@ -926,26 +927,18 @@ func (rf *Raft) leaderLoop() {
 					rf.mu.Unlock()
 				}()
 
-				time.Sleep(time.Duration(HEARTBEAT+rand.Intn(HEARTBEATLENGTH)) * time.Millisecond)
+				time.Sleep(time.Duration(Heartbeat+rand.Intn(HeatbeatLength)) * time.Millisecond)
 			}
 
-			rf.mu.Lock()
-			if rf.killed || rf.state != LEADER || rf.currentTerm != currentTerm {
-				if leaveLeaderLoopChan.isFollower {
-					rf.mu.Unlock()
-					return
+			if shouldLeaveLeaderLoop() {
+				if atomic.CompareAndSwapInt32(&leaveLeaderLoopChan.isFollower, 0, 1) {
+					leaveLeaderLoopChan.leaderToFollower <- struct{}{}
 				}
-				rf.mu.Unlock()
-				leaveLeaderLoopChan.leaderToFollower <- struct{}{}
-			} else {
-				rf.mu.Unlock()
 			}
 		}(i)
-
 	}
 
 	<-leaveLeaderLoopChan.leaderToFollower
-	leaveLeaderLoopChan.isFollower = true
 }
 
 //
@@ -981,39 +974,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go func() {
 		for {
-
+			if rf.isKilled() {
+				break
+			}
 			timeOut := make(chan struct{}, 1)
 			rf.followerLoop(timeOut)
 
-			rf.mu.Lock()
-			rf.state = CANDIDATE
-			rf.currentTerm += 1
-			rf.votedFor = rf.me
-			// Prepare RPC call parameters
-			args := RequestVoteArgs{
-				Term:        rf.currentTerm,
-				CandidateId: rf.me,
-			}
-			if rf.Len() == 0 {
-				args.LastLogTerm = 0
-				args.LastLogIndex = 0
-			} else if rf.Len() != 0 {
-				args.LastLogTerm = rf.lastExcludedTerm
-				args.LastLogIndex = rf.Len()
-				if rf.Index(rf.Len()) != -1 {
-					args.LastLogTerm = rf.log[rf.Index(rf.Len())].Term
-				}
-			} else {
-				panic("Can't happen!")
-			}
-
-			if rf.killed {
-				rf.mu.Unlock()
+			if rf.isKilled() {
 				break
 			}
-			rf.mu.Unlock()
-
-			state := rf.candidateLoop(args, timeOut)
+			state := rf.candidateLoop(timeOut)
 
 			rf.mu.Lock()
 			rf.state = state
