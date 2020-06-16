@@ -17,29 +17,16 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "labrpc"
-
-import (
-	crand "crypto/rand"
-	"math/rand"
-)
-import "math/big"
-import "time"
-import "log"
-
 import "bytes"
-import "labgob"
-
-import "helper"
 import "fmt"
+import "log"
+import "math/rand"
+import "sync"
+import "time"
 
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := crand.Int(crand.Reader, max)
-	x := bigx.Int64()
-	return x
-}
+import "labrpc"
+import "labgob"
+import "app"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -101,10 +88,9 @@ type Raft struct {
 	nextIndex              []int
 	matchIndex             []int
 	refreshElectionTimeout chan struct{}
-	timeOut                chan struct{}
 	applyCh                chan ApplyMsg
 	killed                 bool
-	app                    helper.Applier // upper app
+	app                    app.Applier // upper app
 	lastExcludedIndex      int
 	lastExcludedTerm       int
 }
@@ -123,7 +109,7 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 // Attach raft instance with upper applier App
-func (rf *Raft) SetApp(app helper.Applier) {
+func (rf *Raft) SetApp(app app.Applier) {
 	rf.app = app
 }
 
@@ -131,13 +117,7 @@ func (rf *Raft) GetLog() []LogEntry {
 	return rf.log
 }
 
-func (rf *Raft) GetCommitIndex() int {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.commitIndex
-}
-
-func (rf *Raft) Persist(i int) {
+func (rf *Raft) TruncateLog(i int) {
 	lastExcludedLog := rf.log[rf.Index(i)]
 	rf.log = rf.log[rf.Index(i)+1:]
 	rf.lastExcludedTerm = lastExcludedLog.Term
@@ -178,18 +158,6 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var (
@@ -376,13 +344,14 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 				reply.ConflictIndex = rf.lastExcludedIndex + 1
 			}
 		} else {
-			log.Fatal("Can not happen!")
+			panic("Can't happen!")
 		}
 
 		// update log state
 		if reply.Success {
 			// append entries
-			log.Printf("Raft %#v[req:%#v] appendEntries, reqPrevLogIndex-reqPrevLogTerm-reqLeaderCommit:%#v-%#v-%#v, args.Term-rf.currentTerm:%#v-%#v, reason is %#v\n", rf.me, args.ReqId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, currentTerm, reason)
+			DPrintf("Raft %#v[req:%#v] appendEntries, reqPrevLogIndex-reqPrevLogTerm-reqLeaderCommit:%#v-%#v-%#v, args.Term-rf.currentTerm:%#v-%#v, reason is %#v\n",
+				rf.me, args.ReqId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, currentTerm, reason)
 			if rf.Index(args.PrevLogIndex) >= -1 {
 				rf.log = rf.log[:rf.Index(args.PrevLogIndex)+1]
 			}
@@ -412,7 +381,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 				rf.lastApplied = k
 			}
 			if rf.commitIndex >= N+1 {
-				log.Printf("Raft %#v apply range:[%#v, %#v], role: %#v\n", rf.me, N+1, rf.commitIndex, rf.state)
+				DPrintf("Raft %#v apply range:[%#v, %#v], role: %#v\n", rf.me, N+1, rf.commitIndex, rf.state)
 			}
 		}
 
@@ -484,8 +453,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.state = FOLLOWER
 	}
 	if rf.app != nil {
-		//Apply(index int, cmd interface{}, isLeader bool, reqId int64)
-		//rf.app.Apply(-1, args.Data, rf.state == LEADER, args.Id)
 		applyMsg := ApplyMsg{
 			CommandValid: true,
 			Command:      args,
@@ -560,7 +527,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 	d.Decode(&lastIncludedTerm)
 	d.Decode(&clientSeqs)
 	d.Decode(&keyValueStore)
-	log.Printf("send install snapshot from %#v to %#v with kv: %#v, reqId: %#v\n", rf.me, server, keyValueStore, args.ReqId)
+	DPrintf("Send install snapshot from %#v to %#v with kv: %#v, reqId: %#v\n", rf.me, server, keyValueStore, args.ReqId)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
@@ -644,7 +611,7 @@ func (rf *Raft) Index(in int) int {
 //
 // Follower loop and timer for candidate
 //
-func (rf *Raft) followerLoop(currentTerm int, timeOut chan struct{}) {
+func (rf *Raft) followerLoop(timeOut chan struct{}) {
 	// reset election timeout
 	var raftElectionTimeout int = START + rand.Intn(LENGTH)
 	go func() {
@@ -808,13 +775,12 @@ func (rf *Raft) leaderLoop() {
 		rf.nextIndex[i] = rf.Len() + 1
 		rf.matchIndex[i] = 0
 	}
-	// leaderToFollower := make(chan struct{})
-	type LeaderToFollowerChan struct {
-		leaderToFollower chan bool
+	type LeaveLeaderLoopChan struct {
+		leaderToFollower chan struct{}
 		isFollower       bool
 	}
-	leaveLeaderLoopChan := LeaderToFollowerChan{
-		leaderToFollower: make(chan bool),
+	leaveLeaderLoopChan := LeaveLeaderLoopChan{
+		leaderToFollower: make(chan struct{}),
 		isFollower:       false,
 	}
 	rf.mu.Unlock()
@@ -887,11 +853,9 @@ func (rf *Raft) leaderLoop() {
 						iPrevLogIndex := rf.Index(args.PrevLogIndex)
 						if iPrevLogIndex >= 0 {
 							args.PrevLogTerm = rf.log[iPrevLogIndex].Term
-						} else if iPrevLogIndex != -1 {
-							log.Fatalf("iPrevLogIndex: %#v\n", iPrevLogIndex)
 						}
 					} else {
-						log.Fatal("Can not happen!")
+						panic("Can't happen!")
 					}
 					// each RPC send multiple log entries
 					if rf.nextIndex[i] < rf.nextIndex[rf.me] {
@@ -914,7 +878,8 @@ func (rf *Raft) leaderLoop() {
 					} else {
 						// consistency check
 						if reply.Success && rf.nextIndex[i]-1 == args.PrevLogIndex {
-							log.Printf("Raft %#v[req:%#v] consistency check of nextIndex[%#v]:%#v, reqPrevLogIndex-reqPrevLogTerm-reqLeaderCommit:%#v-%#v-%#v, reply.Term-rf.currentTerm:%#v-%#v\n", rf.me, args.ReqId, i, rf.nextIndex[i], args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, reply.Term, rf.currentTerm)
+							DPrintf("Raft %#v[req:%#v] consistency check of nextIndex[%#v]:%#v, reqPrevLogIndex-reqPrevLogTerm-reqLeaderCommit:%#v-%#v-%#v, reply.Term-rf.currentTerm:%#v-%#v\n",
+								rf.me, args.ReqId, i, rf.nextIndex[i], args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, reply.Term, rf.currentTerm)
 							rf.nextIndex[i] += len(args.Entries)
 							if len(args.Entries) != 0 {
 								rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
@@ -946,7 +911,7 @@ func (rf *Raft) leaderLoop() {
 										rf.lastApplied = k
 									}
 									if N >= rf.commitIndex+1 {
-										log.Printf("Raft %#v apply range: [%#v, %#v], role: %#v\n", rf.me, rf.commitIndex+1, N, rf.state)
+										DPrintf("Raft %#v apply range: [%#v, %#v], role: %#v\n", rf.me, rf.commitIndex+1, N, rf.state)
 									}
 									rf.commitIndex = N
 								}
@@ -971,7 +936,7 @@ func (rf *Raft) leaderLoop() {
 					return
 				}
 				rf.mu.Unlock()
-				leaveLeaderLoopChan.leaderToFollower <- true
+				leaveLeaderLoopChan.leaderToFollower <- struct{}{}
 			} else {
 				rf.mu.Unlock()
 			}
@@ -979,7 +944,6 @@ func (rf *Raft) leaderLoop() {
 
 	}
 
-	//<-leaderToFollower
 	<-leaveLeaderLoopChan.leaderToFollower
 	leaveLeaderLoopChan.isFollower = true
 }
@@ -1010,7 +974,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.killed = false
 	rf.state = FOLLOWER
 	rf.votedFor = -1
-	rf.timeOut = make(chan struct{}, 1)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	// initialize from state persisted before a crash
@@ -1020,7 +983,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		for {
 
 			timeOut := make(chan struct{}, 1)
-			rf.followerLoop(rf.currentTerm, timeOut)
+			rf.followerLoop(timeOut)
 
 			rf.mu.Lock()
 			rf.state = CANDIDATE
@@ -1041,7 +1004,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					args.LastLogTerm = rf.log[rf.Index(rf.Len())].Term
 				}
 			} else {
-				log.Fatal("Can not happend!")
+				panic("Can't happen!")
 			}
 
 			if rf.killed {
@@ -1056,7 +1019,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.state = state
 			if rf.state == LEADER {
 				rf.mu.Unlock()
-				log.Printf("RAFT leader at %#v is %#v\n", rf.currentTerm, rf.me)
+				DPrintf("Raft leader at %#v is %#v\n", rf.currentTerm, rf.me)
 				rf.leaderLoop()
 			} else {
 				rf.mu.Unlock()
