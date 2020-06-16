@@ -14,7 +14,6 @@ import "math/big"
 import "shardmaster"
 import "time"
 import "sync"
-import "fmt"
 
 //
 // which shard is a key in?
@@ -185,7 +184,7 @@ func (ck *Clerk) tryPutAppend(done chan PutAppendReply, args *PutAppendArgs, sha
 	ck.mu.Unlock()
 	ok := srv.Call("ShardKV.PutAppend", args, reply)
 	if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-		fmt.Printf("Key-Value: %#v-%#v Served by %#v at config %#v with client:seq %#v:%#v\n", args.Key, args.Value, rpcLeader, configNum, args.ClientId, args.Seq)
+		DPrintf("Key-Value: %#v-%#v Served by %#v at config %#v with client:seq %#v:%#v\n", args.Key, args.Value, rpcLeader, configNum, args.ClientId, args.Seq)
 		done <- *reply
 	} else if ok && reply.WrongLeader {
 		ck.mu.Lock()

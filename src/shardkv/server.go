@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -48,7 +48,8 @@ type ShardKV struct {
 	appliedCmds       map[int]*appliedResult
 	lastIncludedIndex int
 	lastIncludedTerm  int
-	keyValueStore     [shardmaster.NShards]map[string]string
+	db                [shardmaster.NShards]map[string]string
+	restart           bool
 
 	id     int64
 	seq    int64
@@ -151,20 +152,21 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 // Apply method called by Raft instance
-func (kv *ShardKV) Apply(index int, cmd interface{}, isLeader bool) {
-	if !isLeader {
-		kv.trySnapshot(index)
-		return
-	}
-
+func (kv *ShardKV) Apply(applyMsg interface{}) {
 	kv.mu.Lock()
+	msg := applyMsg.(*raft.ApplyMsg)
+	index := msg.CommandIndex
+	cmd := msg.Command
+	isLeader := msg.IsLeader
 	switch cmd.(type) {
 	case GetArgs:
+		kv.trySnapshot(index)
+		if !isLeader {
+			kv.mu.Unlock()
+			break
+		}
 		args := cmd.(GetArgs)
-		value, err := kv.getValue(args.Key, index)
-		kv.mu.Unlock()
-		reply := GetReply{Value: value, Err: err}
-		kv.mu.Lock()
+		reply := kv.get(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{
 			Key:    kv.getFmtKey(&args),
 			Result: reply,
@@ -176,11 +178,9 @@ func (kv *ShardKV) Apply(index int, cmd interface{}, isLeader bool) {
 			kv.mu.Unlock()
 		}
 	case PutAppendArgs:
+		kv.trySnapshot(index)
 		args := cmd.(PutAppendArgs)
-		kv.clientSeqs[args.ClientId] = args.Seq
-		kv.mu.Unlock()
-		reply := PutAppendReply{Err: OK}
-		kv.mu.Lock()
+		reply := kv.putAppend(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{
 			Key:    kv.putAppendFmtKey(&args),
 			Result: reply,
@@ -191,192 +191,137 @@ func (kv *ShardKV) Apply(index int, cmd interface{}, isLeader bool) {
 		} else {
 			kv.mu.Unlock()
 		}
+	case *raft.InstallSnapshotArgs: // install snapshot
+		args := cmd.(*raft.InstallSnapshotArgs)
+		kv.readSnapshot(kv.persister.ReadSnapshot())
+		DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v, leaderId-term-index:%#v-%#v-%#v\n",
+			kv.rf.GetRaftInstanceName(), kv.db, args.ReqId, args.LeaderId, args.LastIncludedTerm, args.LastIncludedIndex)
+		kv.mu.Unlock()
 	default:
+		kv.trySnapshot(index)
 		kv.mu.Unlock()
 	}
-
-	kv.trySnapshot(index)
 }
 
-func (kv *ShardKV) getValue(key string, index int) (string, Err) {
-	if value, ok := kv.keyValueStore[key]; !ok {
-		return ErrNoKey
+func (kv *ShardKV) get(args *GetArgs, index int, isLeader bool) GetReply {
+	if value, ok := kv.db[key2shard(args.Key)][args.Key]; !ok {
+		return GetReply{Value: "", Err: ErrNoKey}
 	} else {
-		return value, OK
+		DPrintf("Op Get at %#v, key:%#v value:%#v, clientId-seq-index:%#v-%#v-%#v, %#v\n",
+			kv.rf.GetRaftInstanceName(), args.Key, value, args.ClientId, args.Seq, index, isLeader)
+		return GetReply{Value: value, Err: OK}
 	}
-
-	//var (
-	//	value string
-	//	err   Err = ErrNoKey
-	//)
-
-	//// get value from snapshot
-	//var (
-	//	lastIncludedIndex int = 0
-	//	lastIncludedTerm  int = 0
-	//	seqs              []*ClientSeq
-	//	kvs               []*KeyValue
-	//)
-	//maxClientSeqs := map[int64]int64{}
-	//state := kv.persister.ReadSnapshot()
-	//r := bytes.NewBuffer(state)
-	//d := labgob.NewDecoder(r)
-	//if kv.persister.SnapshotSize() != 0 &&
-	//	(d.Decode(&lastIncludedIndex) != nil ||
-	//		d.Decode(&lastIncludedTerm) != nil ||
-	//		d.Decode(&seqs) != nil ||
-	//		d.Decode(&kvs) != nil) {
-	//	return "", err
-	//}
-	//for _, kv := range kvs {
-	//	if kv.Key == key {
-	//		value = kv.Value
-	//		break
-	//	}
-	//}
-	//for i := range seqs {
-	//	clientSeq := seqs[i]
-	//	maxClientSeqs[clientSeq.ClientId] = clientSeq.Seq
-	//}
-
-	//dedup := map[string]bool{}
-	//logs := kv.rf.GetLog()
-	//for i := lastIncludedIndex + 1; i <= index; i++ {
-	//	logEntry := logs[kv.rf.Index(i)]
-	//	switch logEntry.Command.(type) {
-	//	case PutAppendArgs:
-	//		entry := logEntry.Command.(PutAppendArgs)
-	//		if entry.Key != key {
-	//			continue
-	//		}
-	//		dedupKey := kv.putAppendFmtKey(&entry)
-	//		if _, ok := dedup[dedupKey]; ok {
-	//			continue
-	//		}
-	//		dedup[dedupKey] = true
-	//		if seq, ok := maxClientSeqs[entry.ClientId]; ok && seq >= entry.Seq {
-	//			continue
-	//		}
-	//		err = OK
-	//		if entry.Op == "Put" {
-	//			value = entry.Value
-	//		} else if entry.Op == "Append" {
-	//			value += entry.Value
-	//		} else {
-	//			log.Fatal("Can not happend")
-	//		}
-	//	default:
-	//	}
-	//}
-
-	//return value, err
 }
 
-func (kv *ShardKV) putAppendValue(key string, value string, index int) Err {
-
+func (kv *ShardKV) putAppend(args *PutAppendArgs, index int, isLeader bool) PutAppendReply {
+	if seq, ok := kv.clientSeqs[args.ClientId]; ok && seq >= args.Seq {
+		DPrintf("Op %#v at %#v, key:%#v, value:%#v, client:%#v, seq:%#v, original:%#v, clientId-seq-index:%#v-%#v-%#v, %#v, filtered by %#v\n",
+			args.Op, kv.rf.GetRaftInstanceName(), args.Key, args.Value, args.ClientId, args.Seq, kv.db[key2shard(args.Key)][args.Key], args.ClientId, args.Seq, index, isLeader, seq)
+		return PutAppendReply{Err: OK}
+	}
+	DPrintf("Op %#v at %#v, key:%#v, value:%#v, client:%#v, seq:%#v, original:%#v, clientId-seq-index:%#v-%#v-%#v, %#v\n",
+		args.Op, kv.rf.GetRaftInstanceName(), args.Key, args.Value, args.ClientId, args.Seq, kv.db[key2shard(args.Key)][args.Key], args.ClientId, args.Seq, index, isLeader)
+	kv.clientSeqs[args.ClientId] = args.Seq
+	if args.Op == "Put" {
+		kv.db[key2shard(args.Key)][args.Key] = args.Value
+	} else {
+		kv.db[key2shard(args.Key)][args.Key] += args.Value
+	}
+	return PutAppendReply{Err: OK}
 }
 
 func (kv *ShardKV) trySnapshot(index int) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if kv.maxraftstate == -1 || kv.persister.RaftStateSize() < kv.maxraftstate {
+	if !((kv.maxraftstate != -1 &&
+		float64(kv.persister.RaftStateSize()) >= float64(kv.maxraftstate)*0.8) ||
+		(kv.restart && kv.lastIncludedIndex > 0)) {
 		return
 	}
+	kv.restart = false
 
-	logs := kv.rf.GetLog()
 	var (
 		lastIncludedIndex int = 0
 		lastIncludedTerm  int = 0
-		seqs              []*ClientSeq
-		kvs               []*KeyValue
 	)
-	oldMaxClientSeqs := map[int64]int64{}
-	maxClientSeqs := map[int64]int64{}
-	kvsMap := map[string]string{}
+	logs := kv.rf.GetLog()
 	state := kv.persister.ReadSnapshot()
-
 	r := bytes.NewBuffer(state)
 	d := labgob.NewDecoder(r)
 	if kv.persister.SnapshotSize() != 0 &&
 		(d.Decode(&lastIncludedIndex) != nil ||
-			d.Decode(&lastIncludedTerm) != nil ||
-			d.Decode(&seqs) != nil ||
-			d.Decode(&kvs) != nil) {
+			d.Decode(&lastIncludedTerm) != nil) {
 		return
 	}
-	for i := range kvs {
-		kv := kvs[i]
-		kvsMap[kv.Key] = kv.Value
-	}
-	for i := range seqs {
-		clientSeq := seqs[i]
-		oldMaxClientSeqs[clientSeq.ClientId] = clientSeq.Seq
-		maxClientSeqs[clientSeq.ClientId] = clientSeq.Seq
-	}
 
-	dedup := map[string]bool{}
 	for i := lastIncludedIndex + 1; i <= index; i++ {
 		logEntry := logs[kv.rf.Index(i)]
 		switch logEntry.Command.(type) {
 		case PutAppendArgs:
-			entry := logEntry.Command.(PutAppendArgs)
-			if seq, ok := oldMaxClientSeqs[entry.ClientId]; ok && seq >= entry.Seq {
+			cmd := logEntry.Command.(PutAppendArgs)
+			if seq, ok := kv.clientSeqs[cmd.ClientId]; ok && seq >= cmd.Seq {
 				continue
 			}
-			dedupKey := kv.putAppendFmtKey(&entry)
-			if _, ok := dedup[dedupKey]; ok {
-				continue
-			}
-			dedup[dedupKey] = true
-			if seq, ok := maxClientSeqs[entry.ClientId]; !ok || seq < entry.Seq {
-				maxClientSeqs[entry.ClientId] = entry.Seq
-			}
-			if entry.Op == "Put" {
-				kvsMap[entry.Key] = entry.Value
-			} else if entry.Op == "Append" {
-				kvsMap[entry.Key] += entry.Value
+			kv.clientSeqs[cmd.ClientId] = cmd.Seq
+			if cmd.Op == "Put" {
+				kv.db[key2shard(cmd.Key)][cmd.Key] = cmd.Value
+			} else if cmd.Op == "Append" {
+				kv.db[key2shard(cmd.Key)][cmd.Key] += cmd.Value
 			} else {
-				log.Fatal("Can not happend")
+				panic("Can't happen")
 			}
 		default:
 		}
 	}
 
-	kvsSnapshot := []*KeyValue{}
-	for k, v := range kvsMap {
-		kvsSnapshot = append(kvsSnapshot, &KeyValue{Key: k, Value: v})
-	}
-	seqsSnapshot := []*ClientSeq{}
-	for clientId, seq := range maxClientSeqs {
-		seqsSnapshot = append(seqsSnapshot, &ClientSeq{ClientId: clientId, Seq: seq})
-	}
 	kv.lastIncludedIndex = index
 	kv.lastIncludedTerm = logs[kv.rf.Index(index)].Term
-	kv.persist(kvsSnapshot, seqsSnapshot)
-	kv.rf.Persist(index)
+	kv.persist()
 	return
 }
 
-func (kv *ShardKV) persist(kvsSnapshot []*KeyValue, seqsSnapshot []*ClientSeq) {
+func (kv *ShardKV) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.lastIncludedIndex)
 	e.Encode(kv.lastIncludedTerm)
-	e.Encode(seqsSnapshot)
-	e.Encode(kvsSnapshot)
+	e.Encode(kv.clientSeqs)
+	e.Encode(kv.db)
 	data := w.Bytes()
 	kv.persister.SaveSnapshot(data)
+	kv.rf.TruncateLog(kv.lastIncludedIndex)
 }
 
-func (kv *ShardKV) pullAndSyncShards(config *shardmaster.Config) bool {
+func (kv *ShardKV) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	var (
+		lastIncludedIndex int = 0
+		lastIncludedTerm  int = 0
+	)
+	kv.db = [shardmaster.NShards]map[string]string{}
+	for i := 0; i < shardmaster.NShards; i++ {
+		kv.db[i] = make(map[string]string)
+	}
+	kv.clientSeqs = make(map[int64]int64)
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	d.Decode(&lastIncludedIndex)
+	d.Decode(&lastIncludedTerm)
+	d.Decode(&kv.clientSeqs)
+	d.Decode(&kv.db)
+	kv.lastIncludedIndex = lastIncludedIndex
+	kv.lastIncludedTerm = lastIncludedTerm
+}
 
+func (kv *ShardKV) pullAndSyncShards(config shardmaster.Config) bool {
+	return true
 }
 
 func (kv *ShardKV) pollConfig(ms int) {
 	// poll configs
 	for {
 		select {
-		case <-time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+		case <-time.After(time.Duration(ms) * time.Millisecond):
 			if _, isLeader := kv.rf.GetState(); isLeader {
 				latestConfig := kv.mck.Query(-1)
 				for i := kv.config.Num + 1; i <= latestConfig.Num; i++ {
@@ -386,7 +331,6 @@ func (kv *ShardKV) pollConfig(ms int) {
 					}
 				}
 			}
-		}):
 		}
 	}
 }
@@ -430,12 +374,16 @@ func (kv *ShardKV) Kill() {
 // StartServer() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, masters []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
+func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
+	maxraftstate int, gid int, masters []*labrpc.ClientEnd,
+	make_end func(string) *labrpc.ClientEnd) *ShardKV {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 	labgob.Register(GetArgs{})
+	labgob.Register(GetReply{})
 	labgob.Register(PutAppendArgs{})
+	labgob.Register(PutAppendReply{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -458,6 +406,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.notices = make(map[int]*sync.Cond)
 	kv.appliedCmds = make(map[int]*appliedResult)
 
+	kv.db = [shardmaster.NShards]map[string]string{}
+	for i := 0; i < shardmaster.NShards; i++ {
+		kv.db[i] = make(map[string]string)
+	}
 	kv.mck = shardmaster.MakeClerk(kv.masters)
 	kv.id = nrand()
 	kv.seq = 0

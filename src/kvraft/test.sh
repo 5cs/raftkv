@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 #TEST_CASES="TestBasic3A
 #TestConcurrent3A

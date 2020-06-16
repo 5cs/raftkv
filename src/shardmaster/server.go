@@ -630,7 +630,10 @@ func (sm *ShardMaster) doMove(index int, args MoveArgs) *appliedResult {
 	return &ret
 }
 
-func (sm *ShardMaster) Apply(index int, cmd interface{}, isLeader bool) {
+func (sm *ShardMaster) Apply(applyMsg interface{}) {
+	msg := applyMsg.(*raft.ApplyMsg)
+	index := msg.CommandIndex
+	cmd := msg.Command
 	sm.mu.Lock()
 	switch cmd.(type) {
 	case QueryArgs:
