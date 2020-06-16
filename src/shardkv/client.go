@@ -14,6 +14,7 @@ import "math/big"
 import "shardmaster"
 import "time"
 import "sync"
+import "fmt"
 
 //
 // which shard is a key in?
@@ -115,6 +116,7 @@ func (ck *Clerk) tryGet(done chan GetReply, args *GetArgs, shard int) {
 	reply := &GetReply{}
 	ck.mu.Lock()
 	srv := ck.make_end(ck.config.Groups[ck.config.Shards[shard]][ck.leaders[shard]])
+	args.ConfigNum = ck.config.Num
 	ck.mu.Unlock()
 	ok := srv.Call("ShardKV.Get", args, reply)
 	if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
@@ -127,7 +129,7 @@ func (ck *Clerk) tryGet(done chan GetReply, args *GetArgs, shard int) {
 	} else if ok && (reply.Err == ErrWrongGroup) {
 		ck.mu.Lock()
 		ck.config = ck.sm.Query(-1)
-		args.ConfigNum = ck.config.Num
+		// args.ConfigNum = ck.config.Num
 		ck.mu.Unlock()
 		go ck.tryGet(done, args, shard)
 	}
@@ -177,9 +179,13 @@ func (ck *Clerk) tryPutAppend(done chan PutAppendReply, args *PutAppendArgs, sha
 	reply := &PutAppendReply{}
 	ck.mu.Lock()
 	srv := ck.make_end(ck.config.Groups[ck.config.Shards[shard]][ck.leaders[shard]])
+	args.ConfigNum = ck.config.Num
+	rpcLeader := ck.config.Groups[ck.config.Shards[shard]][ck.leaders[shard]]
+	configNum := args.ConfigNum
 	ck.mu.Unlock()
 	ok := srv.Call("ShardKV.PutAppend", args, reply)
 	if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+		fmt.Printf("Key-Value: %#v-%#v Served by %#v at config %#v with client:seq %#v:%#v\n", args.Key, args.Value, rpcLeader, configNum, args.ClientId, args.Seq)
 		done <- *reply
 	} else if ok && reply.WrongLeader {
 		ck.mu.Lock()
@@ -189,7 +195,7 @@ func (ck *Clerk) tryPutAppend(done chan PutAppendReply, args *PutAppendArgs, sha
 	} else if ok && reply.Err == ErrWrongGroup {
 		ck.mu.Lock()
 		ck.config = ck.sm.Query(-1)
-		args.ConfigNum = ck.config.Num
+		// args.ConfigNum = ck.config.Num
 		ck.mu.Unlock()
 		go ck.tryPutAppend(done, args, shard)
 	}
