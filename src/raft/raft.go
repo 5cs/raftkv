@@ -119,6 +119,9 @@ func (rf *Raft) GetLog() []LogEntry {
 }
 
 func (rf *Raft) TruncateLog(i int) {
+	if rf.Index(i) < 0 || rf.Index(i) >= len(rf.log) {
+		return
+	}
 	lastExcludedLog := rf.log[rf.Index(i)]
 	rf.log = rf.log[rf.Index(i)+1:]
 	rf.lastExcludedTerm = lastExcludedLog.Term

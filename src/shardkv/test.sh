@@ -14,7 +14,10 @@ TestChallenge1Concurrent
 TestChallenge2Unaffected
 TestChallenge2Partial"
 
-TEST_CASES="TestStaticShards"
+TEST_CASES="TestStaticShards
+TestJoinLeave
+TestSnapshot"
+
 
 for test_case in $TEST_CASES; do
   echo $test_case
