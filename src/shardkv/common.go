@@ -57,6 +57,7 @@ type MigrateShardArgs struct {
 	ConfigNum int
 	ClientId  int64
 	Seq       int64
+	Name      string
 }
 
 type MigrateShardReply struct {

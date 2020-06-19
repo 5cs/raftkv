@@ -9,6 +9,7 @@ import "fmt"
 import "sync/atomic"
 import "sync"
 import "math/rand"
+import "log"
 
 const linearizabilityCheckTimeout = 1 * time.Second
 
@@ -337,11 +338,13 @@ func TestConcurrent1(t *testing.T) {
 
 	cfg.join(1)
 	time.Sleep(500 * time.Millisecond)
+	log.Printf("TEST 1, 1 joined\n")
 	// cfg.masterservers[0].DumpMasterServer()
 	// cfg.masterservers[1].DumpMasterServer()
 	// cfg.masterservers[2].DumpMasterServer()
 	cfg.join(2)
 	time.Sleep(500 * time.Millisecond)
+	log.Printf("TEST 2, 2 joined\n")
 	// cfg.masterservers[0].DumpMasterServer()
 	// cfg.masterservers[1].DumpMasterServer()
 	// cfg.masterservers[2].DumpMasterServer()
@@ -352,28 +355,35 @@ func TestConcurrent1(t *testing.T) {
 
 	cfg.ShutdownGroup(0)
 	time.Sleep(100 * time.Millisecond)
+	log.Printf("TEST 3, 0 leaved and group 0 shutted down\n")
 	// cfg.masterservers[0].DumpMasterServer()
 	// cfg.masterservers[1].DumpMasterServer()
 	// cfg.masterservers[2].DumpMasterServer()
 	cfg.ShutdownGroup(1)
 	time.Sleep(100 * time.Millisecond)
+	log.Printf("TEST 4, group 1 shutted down\n")
 	// cfg.masterservers[0].DumpMasterServer()
 	// cfg.masterservers[1].DumpMasterServer()
 	// cfg.masterservers[2].DumpMasterServer()
 	cfg.ShutdownGroup(2)
+	log.Printf("TEST 5, group 2 shutted down\n")
 
 	cfg.leave(2)
+	log.Printf("TEST 6, group 2 leaved\n")
 
 	time.Sleep(100 * time.Millisecond)
 	cfg.StartGroup(0)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
+	log.Printf("TEST 7, group 0,1,2 started up\n")
 
 	time.Sleep(100 * time.Millisecond)
 	cfg.join(0)
 	cfg.leave(1)
+	log.Printf("TEST 8, group 0 joined, group 1 leaved\n")
 	time.Sleep(500 * time.Millisecond)
 	cfg.join(1)
+	log.Printf("TEST 9, group 1 joined\n")
 
 	time.Sleep(1 * time.Second)
 

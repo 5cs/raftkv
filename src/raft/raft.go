@@ -114,6 +114,10 @@ func (rf *Raft) SetApp(app app.Applier) {
 	rf.app = app
 }
 
+func (rf *Raft) GetLastApplied() int {
+	return rf.lastApplied
+}
+
 func (rf *Raft) GetLog() []LogEntry {
 	return rf.log
 }
@@ -992,7 +996,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.state = state
 			if rf.state == LEADER {
 				rf.mu.Unlock()
-				DPrintf("Raft leader at %#v is %#v\n", rf.currentTerm, rf.me)
+				if rf.app != nil {
+					DPrintf("Raft leader at %#v is %#v, %#v\n", rf.currentTerm, rf.me, rf.app.Name())
+				}
 				rf.leaderLoop()
 			} else {
 				rf.mu.Unlock()

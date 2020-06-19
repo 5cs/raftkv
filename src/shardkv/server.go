@@ -50,11 +50,12 @@ type ShardKV struct {
 	lastIncludedTerm  int
 	db                [shardmaster.NShards]map[string]string
 
-	name   string
-	id     int64
-	seq    int64
-	mck    *shardmaster.Clerk
-	config shardmaster.Config // persist state
+	name      string
+	id        int64
+	seq       int64
+	mck       *shardmaster.Clerk
+	config    shardmaster.Config // persist state
+	newConfig shardmaster.Config // new config
 }
 
 type appliedResult struct {
@@ -198,6 +199,10 @@ func (kv *ShardKV) SyncShard(args *SyncShardArgs, reply *SyncShardReply) {
 	}
 }
 
+func (kv *ShardKV) Name() string {
+	return kv.name
+}
+
 // Apply method called by Raft instance
 func (kv *ShardKV) Apply(applyMsg interface{}) {
 	kv.mu.Lock()
@@ -225,13 +230,13 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 			kv.mu.Unlock()
 		}
 	case PutAppendArgs:
-		kv.trySnapshot(index)
 		args := cmd.(PutAppendArgs)
 		reply := kv.putAppend(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{
 			Key:    kv.putAppendFmtKey(&args),
 			Result: reply,
 		}
+		kv.trySnapshot(index)
 		if _, ok := kv.notices[index]; ok {
 			kv.mu.Unlock()
 			kv.notices[index].Broadcast()
@@ -246,8 +251,9 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 		kv.mu.Unlock()
 	case SyncShardArgs:
 		args := cmd.(SyncShardArgs)
-		log.Printf("Op \"SyncShard\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-seq:%#v-%#v, get values: %#v", kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.Seq, args.Data)
-		reply := kv.applySyncShard(&args, index, isLeader)
+		log.Printf("Op \"SyncShard\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-seq:%#v-%#v, get values: %#v",
+			kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.Seq, args.Data)
+		reply := kv.syncShard(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{
 			Key:    kv.syncShardFmtKey(&args),
 			Result: reply,
@@ -265,8 +271,7 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 }
 
 func (kv *ShardKV) get(args *GetArgs, index int, isLeader bool) GetReply {
-	if kv.config.Shards[key2shard(args.Key)] != kv.gid || kv.config.Num != args.ConfigNum {
-		// if kv.config.Shards[key2shard(args.Key)] != kv.gid {
+	if kv.config.Shards[key2shard(args.Key)] != kv.gid {
 		return GetReply{Value: "", Err: ErrWrongGroup}
 	}
 	if value, ok := kv.db[key2shard(args.Key)][args.Key]; !ok {
@@ -279,8 +284,9 @@ func (kv *ShardKV) get(args *GetArgs, index int, isLeader bool) GetReply {
 }
 
 func (kv *ShardKV) putAppend(args *PutAppendArgs, index int, isLeader bool) PutAppendReply {
-	if kv.config.Shards[key2shard(args.Key)] != kv.gid || kv.config.Num != args.ConfigNum {
-		// if kv.config.Shards[key2shard(args.Key)] != kv.gid {
+	if kv.config.Shards[key2shard(args.Key)] != kv.gid {
+		log.Printf("Op %#v at %#v, kv.configNum-arg.config:%#v-%#v, key:%#v, value:%#v, client:%#v, seq:%#v, original:%#v, clientId-seq-index:%#v-%#v-%#v, %#v, gid-kv.gid:%#v-%#v\n",
+			args.Op, kv.name, kv.config.Num, args.ConfigNum, args.Key, args.Value, args.ClientId, args.Seq, kv.db[key2shard(args.Key)][args.Key], args.ClientId, args.Seq, index, isLeader, kv.config.Shards[key2shard(args.Key)], kv.gid)
 		return PutAppendReply{Err: ErrWrongGroup}
 	}
 	if seq, ok := kv.clientSeqs[args.ClientId]; ok && seq >= args.Seq {
@@ -299,7 +305,7 @@ func (kv *ShardKV) putAppend(args *PutAppendArgs, index int, isLeader bool) PutA
 	return PutAppendReply{Err: OK}
 }
 
-func (kv *ShardKV) applySyncShard(args *SyncShardArgs, index int, isLeader bool) SyncShardReply {
+func (kv *ShardKV) syncShard(args *SyncShardArgs, index int, isLeader bool) SyncShardReply {
 	if args.Config.Num <= kv.config.Num {
 		return SyncShardReply{Err: OK, WrongLeader: false}
 	}
@@ -313,6 +319,7 @@ func (kv *ShardKV) applySyncShard(args *SyncShardArgs, index int, isLeader bool)
 			kv.clientSeqs[clientId] = seq
 		}
 	}
+	kv.clientSeqs[args.ClientId] = args.Seq
 	kv.config = args.Config
 	return SyncShardReply{Err: OK, WrongLeader: false}
 }
@@ -323,42 +330,7 @@ func (kv *ShardKV) trySnapshot(index int) {
 		return
 	}
 
-	var (
-		lastIncludedIndex int = 0
-		lastIncludedTerm  int = 0
-		config                = shardmaster.Config{}
-	)
 	logs := kv.rf.GetLog()
-	state := kv.persister.ReadSnapshot()
-	r := bytes.NewBuffer(state)
-	d := labgob.NewDecoder(r)
-	if kv.persister.SnapshotSize() != 0 &&
-		(d.Decode(&config) != nil ||
-			d.Decode(&lastIncludedIndex) != nil ||
-			d.Decode(&lastIncludedTerm) != nil) {
-		return
-	}
-
-	for i := lastIncludedIndex + 1; i <= index; i++ {
-		logEntry := logs[kv.rf.Index(i)]
-		switch logEntry.Command.(type) {
-		case PutAppendArgs:
-			cmd := logEntry.Command.(PutAppendArgs)
-			if seq, ok := kv.clientSeqs[cmd.ClientId]; ok && seq >= cmd.Seq {
-				continue
-			}
-			kv.clientSeqs[cmd.ClientId] = cmd.Seq
-			if cmd.Op == "Put" {
-				kv.db[key2shard(cmd.Key)][cmd.Key] = cmd.Value
-			} else if cmd.Op == "Append" {
-				kv.db[key2shard(cmd.Key)][cmd.Key] += cmd.Value
-			} else {
-				panic("Can't happen")
-			}
-		default:
-		}
-	}
-
 	kv.lastIncludedIndex = index
 	kv.lastIncludedTerm = logs[kv.rf.Index(index)].Term
 	kv.persist()
@@ -408,11 +380,12 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 func (kv *ShardKV) MigrateShard(args *MigrateShardArgs, reply *MigrateShardReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	defer log.Printf("args: %#v, reply: %#v\n", args, reply)
-	if _, isLeader := kv.rf.GetState(); !isLeader { // pull from group leader?
+	if term, isLeader := kv.rf.GetState(); !isLeader { // pull from group leader?
 		reply.WrongLeader = true
+		// log.Printf("Migrate me-term-cfgn: %#v-%#v-%#v, args: %#v, reply: %#v\n", kv.name, term, kv.config.Num, args, reply)
 		return
 	}
+	defer log.Printf("Migrate me-cfgn: %#v-%#v, args: %#v, reply: %#v\n", kv.name, kv.config.Num, args, reply)
 	if args.ConfigNum > kv.config.Num {
 		reply.Err = ErrNoKey
 		return
@@ -448,8 +421,12 @@ func (kv *ShardKV) tryPullShard(args *MigrateShardArgs, done chan MigrateShardRe
 	if ok && reply.Err == OK {
 		done <- reply
 	} else if ok && reply.Err == ErrNoKey {
-		go kv.tryPullShard(args, done, (leader+1)%len(servers), servers)
+		time.Sleep(time.Duration(100) * time.Millisecond)
+		go kv.tryPullShard(args, done, leader, servers)
 	} else if ok && reply.WrongLeader {
+		if leader == len(servers)-1 { // No leader at all, wait 500ms
+			time.Sleep(time.Duration(500) * time.Millisecond)
+		}
 		go kv.tryPullShard(args, done, (leader+1)%len(servers), servers)
 	}
 }
@@ -461,8 +438,8 @@ func (kv *ShardKV) pullShard(args *MigrateShardArgs, reply *MigrateShardReply, g
 	for {
 		select {
 		case <-time.After(time.Duration(100) * time.Millisecond):
-			leader = (leader + 1) & len(servers)
-			go kv.tryPullShard(args, done, (leader+1)%len(servers), servers)
+			leader = (leader + 1) % len(servers)
+			go kv.tryPullShard(args, done, leader, servers)
 		case *reply = <-done:
 			return
 		}
@@ -539,6 +516,7 @@ func (kv *ShardKV) pullAndSyncShards(config shardmaster.Config) bool {
 					ConfigNum: kv.config.Num,
 					ClientId:  kv.id,
 					Seq:       kv.seq,
+					Name:      kv.name,
 				}
 				kv.seq += 1
 				kv.mu.Unlock()

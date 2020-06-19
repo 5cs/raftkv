@@ -14,7 +14,6 @@ import "math/big"
 import "shardmaster"
 import "time"
 import "sync"
-import "log"
 
 //
 // which shard is a key in?
@@ -130,9 +129,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		for i := 0; i < len(servers); i++ {
 			srv := ck.make_end(servers[i])
 			reply := PutAppendReply{}
-			log.Printf("PutAppend %#v to:%#v, args:%#v\n", servers, servers[i], args)
+			// log.Printf("PutAppend %#v to:%#v, args:%#v\n", servers, servers[i], args)
 			ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-			log.Printf("reply %#v:%#v\n", servers[i], reply)
+			// log.Printf("reply %#v:%#v\n", servers[i], reply)
 			if ok && (reply.Err == OK) {
 				return
 			} else if ok && reply.Err == ErrWrongGroup {
