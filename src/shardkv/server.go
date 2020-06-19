@@ -50,17 +50,26 @@ type ShardKV struct {
 	lastIncludedTerm  int
 	db                [shardmaster.NShards]map[string]string
 
-	name      string
-	id        int64
-	seq       int64
-	mck       *shardmaster.Clerk
-	config    shardmaster.Config // persist state
-	newConfig shardmaster.Config // new config
+	name          string
+	id            int64
+	seq           int64
+	mck           *shardmaster.Clerk
+	config        shardmaster.Config // persist state
+	pendingConfig *PendingConfig     // new config
 }
 
 type appliedResult struct {
 	Key    string
 	Result interface{}
+}
+
+type PendingConfig struct {
+	mu                 sync.Mutex
+	Config             shardmaster.Config
+	ShardsNeedToAdd    map[int]bool
+	ShardsNeedToDelete map[int]bool
+	IsDeleted          bool // for CAS
+	IsSynced           bool
 }
 
 func (kv *ShardKV) getFmtKey(args *GetArgs) string {
@@ -69,6 +78,10 @@ func (kv *ShardKV) getFmtKey(args *GetArgs) string {
 
 func (kv *ShardKV) putAppendFmtKey(args *PutAppendArgs) string {
 	return fmt.Sprintf("%v_%v_%v", args.Key, args.ClientId, args.Seq)
+}
+
+func (kv *ShardKV) migrateShardFmtKey(args *MigrateShardArgs) string {
+	return fmt.Sprintf("%v_%v_%v", args.ConfigNum, args.ClientId, args.Seq)
 }
 
 func (kv *ShardKV) syncShardFmtKey(args *SyncShardArgs) string {
@@ -154,6 +167,75 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 		kv.mu.Unlock()
 	}
+}
+
+// RPC handle for migrating shards
+func (kv *ShardKV) MigrateShard(args *MigrateShardArgs, reply *MigrateShardReply) {
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	defer log.Printf("Migrate me-cfgn: %#v-%#v, args: %#v, reply: %#v\n", kv.name, kv.config.Num, args, reply)
+
+	kv.mu.Lock()
+	if args.ConfigNum > kv.config.Num {
+		reply.Err = ErrNoKey
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	// agree on deleted shards
+	cmd := *args
+loop:
+	for {
+		*reply = MigrateShardReply{}
+		index, _, isLeader := kv.rf.Start(cmd)
+		if !isLeader {
+			reply.WrongLeader = true
+			return
+		}
+
+		kv.mu.Lock()
+		if _, ok := kv.notices[index]; !ok {
+			kv.notices[index] = sync.NewCond(&kv.mu)
+		}
+		kv.notices[index].Wait()
+
+		ret := kv.appliedCmds[index]
+		k := kv.migrateShardFmtKey(args)
+		if ret.Key == k {
+			switch ret.Result.(type) {
+			case MigrateShardReply:
+				*reply = ret.Result.(MigrateShardReply)
+				kv.mu.Unlock()
+				break loop
+			default:
+			}
+		}
+		kv.mu.Unlock()
+	}
+
+	// waitting leader pulls config
+	time.Sleep(time.Duration(100) * time.Millisecond)
+
+	kv.mu.Lock()
+	reply.Err = OK
+	reply.Data = make([]map[string]string, shardmaster.NShards)
+	for i := 0; i < shardmaster.NShards; i++ {
+		reply.Data[i] = make(map[string]string)
+	}
+	for _, shard := range args.Shards {
+		for k, v := range kv.db[shard] { // copy data shard
+			reply.Data[shard][k] = v
+		}
+	}
+
+	reply.ClientSeqs = make(map[int64]int64)
+	for clientId, seq := range kv.clientSeqs { // copy client seq
+		reply.ClientSeqs[clientId] = seq
+	}
+	kv.mu.Unlock()
 }
 
 func (kv *ShardKV) SyncShard(args *SyncShardArgs, reply *SyncShardReply) {
@@ -264,6 +346,19 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 		} else {
 			kv.mu.Unlock()
 		}
+	case MigrateShardArgs:
+		args := cmd.(MigrateShardArgs)
+		reply := kv.migrateShard(&args, index, isLeader)
+		kv.appliedCmds[index] = &appliedResult{
+			Key:    kv.migrateShardFmtKey(&args),
+			Result: reply,
+		}
+		if _, ok := kv.notices[index]; ok {
+			kv.mu.Unlock()
+			kv.notices[index].Broadcast()
+		} else {
+			kv.mu.Unlock()
+		}
 	default:
 		kv.trySnapshot(index)
 		kv.mu.Unlock()
@@ -320,8 +415,38 @@ func (kv *ShardKV) syncShard(args *SyncShardArgs, index int, isLeader bool) Sync
 		}
 	}
 	kv.clientSeqs[args.ClientId] = args.Seq
+
+	// check pending config
+	if kv.pendingConfig != nil {
+		kv.pendingConfig.mu.Lock()
+		for shard := range kv.pendingConfig.ShardsNeedToAdd {
+			kv.pendingConfig.ShardsNeedToAdd[shard] = false
+		}
+		kv.pendingConfig.IsSynced = true
+		kv.pendingConfig.mu.Unlock()
+	}
+
+	if kv.pendingConfig != nil {
+		kv.pendingConfig.mu.Lock()
+		if !isLeader {
+			panic("needs resync shards")
+		}
+		if args.Config.Num != kv.pendingConfig.Config.Num {
+			panic("wrong config order!")
+		}
+		if kv.pendingConfig.IsSynced && kv.pendingConfig.IsDeleted {
+			kv.config = kv.pendingConfig.Config
+			// TODO: sync config with other nodes
+		}
+		kv.pendingConfig.mu.Unlock()
+	}
 	kv.config = args.Config
 	return SyncShardReply{Err: OK, WrongLeader: false}
+}
+
+func (kv *ShardKV) migrateShard(args *MigrateShardArgs, index int, isLeader bool) MigrateShardReply {
+	// TODO: persist deleted shards state
+	return MigrateShardReply{}
 }
 
 func (kv *ShardKV) trySnapshot(index int) {
@@ -374,38 +499,6 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	kv.config = config
 	kv.lastIncludedIndex = lastIncludedIndex
 	kv.lastIncludedTerm = lastIncludedTerm
-}
-
-// RPC handle for migrating shards
-func (kv *ShardKV) MigrateShard(args *MigrateShardArgs, reply *MigrateShardReply) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	if term, isLeader := kv.rf.GetState(); !isLeader { // pull from group leader?
-		reply.WrongLeader = true
-		// log.Printf("Migrate me-term-cfgn: %#v-%#v-%#v, args: %#v, reply: %#v\n", kv.name, term, kv.config.Num, args, reply)
-		return
-	}
-	defer log.Printf("Migrate me-cfgn: %#v-%#v, args: %#v, reply: %#v\n", kv.name, kv.config.Num, args, reply)
-	if args.ConfigNum > kv.config.Num {
-		reply.Err = ErrNoKey
-		return
-	}
-
-	reply.Err = OK
-	reply.Data = make([]map[string]string, shardmaster.NShards)
-	for i := 0; i < shardmaster.NShards; i++ {
-		reply.Data[i] = make(map[string]string)
-	}
-	for _, shard := range args.Shards {
-		for k, v := range kv.db[shard] { // copy data shard
-			reply.Data[shard][k] = v
-		}
-	}
-
-	reply.ClientSeqs = make(map[int64]int64)
-	for clientId, seq := range kv.clientSeqs { // copy client seq
-		reply.ClientSeqs[clientId] = seq
-	}
 }
 
 func (kv *ShardKV) sendMigrateShard(server string, args *MigrateShardArgs, reply *MigrateShardReply) bool {
@@ -476,9 +569,19 @@ func (kv *ShardKV) pullAndSyncShards(config shardmaster.Config) bool {
 		}
 	}
 
+	// create pending config
+	kv.mu.Lock()
+	kv.pendingConfig = &PendingConfig{
+		mu:                 sync.Mutex{},
+		Config:             config,
+		ShardsNeedToAdd:    shardsNeedToAdd,
+		ShardsNeedToDelete: shardsNeedToDelete,
+		IsDeleted:          false,
+		IsSynced:           false,
+	}
+
 	// RPC parameter for sync data shards
 	mtx := sync.Mutex{}
-	kv.mu.Lock()
 	syncShardArgs := SyncShardArgs{
 		Data:       make([]map[string]string, shardmaster.NShards),
 		ClientSeqs: make(map[int64]int64),
@@ -513,7 +616,7 @@ func (kv *ShardKV) pullAndSyncShards(config shardmaster.Config) bool {
 				kv.mu.Lock()
 				args := MigrateShardArgs{
 					Shards:    shards,
-					ConfigNum: kv.config.Num,
+					ConfigNum: kv.config.Num, // old config
 					ClientId:  kv.id,
 					Seq:       kv.seq,
 					Name:      kv.name,
@@ -543,6 +646,9 @@ func (kv *ShardKV) pullAndSyncShards(config shardmaster.Config) bool {
 	log.Printf("At %#v, pulled shards: %#v\n", kv.name, syncShardArgs)
 	syncShardReply := SyncShardReply{}
 	kv.SyncShard(&syncShardArgs, &syncShardReply)
+	if syncShardReply.WrongLeader {
+		return false
+	}
 	return true
 }
 
@@ -613,6 +719,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(GetReply{})
 	labgob.Register(PutAppendArgs{})
 	labgob.Register(PutAppendReply{})
+	labgob.Register(MigrateShardArgs{})
+	labgob.Register(MigrateShardReply{})
 	labgob.Register(SyncShardArgs{})
 	labgob.Register(SyncShardReply{})
 
