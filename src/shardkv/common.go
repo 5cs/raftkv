@@ -71,7 +71,9 @@ type MigrateShardReply struct {
 type SyncShardArgs struct {
 	Data       []map[string]string
 	ClientSeqs map[int64]int64
-	Config     shardmaster.Config
+	Shards     []int
+	ConfigNum  int                // prev config num
+	Config     shardmaster.Config // new config
 	ClientId   int64
 	Seq        int64
 }
