@@ -523,19 +523,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryArgs, reply *Appe
 // sendInstallSnapshot
 //
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	var (
-		lastIncludedIndex int = 0
-		lastIncludedTerm  int = 0
-	)
-	keyValueStore := make(map[string]string)
-	clientSeqs := make(map[int64]int64)
-	r := bytes.NewBuffer(args.Data)
-	d := labgob.NewDecoder(r)
-	d.Decode(&lastIncludedIndex)
-	d.Decode(&lastIncludedTerm)
-	d.Decode(&clientSeqs)
-	d.Decode(&keyValueStore)
-	DPrintf("Send install snapshot from %#v to %#v with kv: %#v, reqId: %#v\n", rf.me, server, keyValueStore, args.ReqId)
+	// var (
+	// 	lastIncludedIndex int = 0
+	// 	lastIncludedTerm  int = 0
+	// )
+	// keyValueStore := make(map[string]string)
+	// clientSeqs := make(map[int64]int64)
+	// r := bytes.NewBuffer(args.Data)
+	// d := labgob.NewDecoder(r)
+	// d.Decode(&lastIncludedIndex)
+	// d.Decode(&lastIncludedTerm)
+	// d.Decode(&clientSeqs)
+	// d.Decode(&keyValueStore)
+	// DPrintf("Send install snapshot from %#v to %#v with kv: %#v, reqId: %#v\n", rf.me, server, keyValueStore, args.ReqId)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
@@ -997,7 +997,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			if rf.state == LEADER {
 				rf.mu.Unlock()
 				if rf.app != nil {
-					DPrintf("Raft leader at %#v is %#v, %#v\n", rf.currentTerm, rf.me, rf.app.Name())
+					log.Printf("Raft leader at %#v is %#v, %#v\n", rf.currentTerm, rf.me, rf.app.Name())
 				}
 				rf.leaderLoop()
 			} else {

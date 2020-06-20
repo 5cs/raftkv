@@ -82,3 +82,12 @@ type SyncShardReply struct {
 	Err         Err
 	WrongLeader bool
 }
+
+type InstallConfigArgs struct {
+	Config   shardmaster.Config
+	ClientId int64
+}
+
+type InstallConfigReply struct {
+	Err Err
+}
