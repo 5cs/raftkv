@@ -184,7 +184,6 @@ func (kv *KVServer) Apply(applyMsg interface{}) {
 			kv.mu.Unlock()
 		}
 	case PutAppendArgs:
-		kv.trySnapshot(index)
 		args := cmd.(PutAppendArgs)
 		reply := kv.putAppend(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{

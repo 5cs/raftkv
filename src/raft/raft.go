@@ -958,6 +958,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rand.Seed(time.Now().UnixNano())
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
