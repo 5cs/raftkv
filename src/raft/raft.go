@@ -305,8 +305,8 @@ type AppendEntryReply struct {
 
 // AppendEntries RPC handler, given a term has at most one leader!
 func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
-	DPrintf("RPC:AppendEntries Callee id: %v term: %v Caller id: %v term: %v len: %v prevLogTerm %v prevLogIndex %v commitIndex %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, len(args.Entries), args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
-	defer DPrintf("=RPC:AppendEntries Callee id: %v term: %v Caller id: %v term: %v len: %v prevLogTerm %v prevLogIndex %v commitIndex %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, len(args.Entries), args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
+	DPrintf("RPC:AppendEntries Callee id: %v term: %v Caller id: %v term: %v len: %v prevLogTerm %v prevLogIndex %v commitIndex %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, len(args.Entries), args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit, rf.app.Name())
+	defer DPrintf("=RPC:AppendEntries Callee id: %v term: %v Caller id: %v term: %v len: %v prevLogTerm %v prevLogIndex %v commitIndex %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, len(args.Entries), args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit, rf.app.Name())
 
 	rf.mu.Lock()
 

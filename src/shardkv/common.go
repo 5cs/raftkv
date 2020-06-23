@@ -76,6 +76,7 @@ type SyncShardArgs struct {
 	Config     shardmaster.Config // new config
 	ClientId   int64
 	Seq        int64
+	ClientName string
 }
 
 type SyncShardReply struct {
@@ -84,8 +85,9 @@ type SyncShardReply struct {
 }
 
 type InstallConfigArgs struct {
-	Config   shardmaster.Config
-	ClientId int64
+	Config     shardmaster.Config
+	ClientId   int64
+	ClientName string
 }
 
 type InstallConfigReply struct {

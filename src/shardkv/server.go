@@ -50,13 +50,12 @@ type ShardKV struct {
 	lastIncludedTerm  int
 	db                [shardmaster.NShards]map[string]string
 
-	name          string
-	id            int64
-	seq           int64
-	mck           *shardmaster.Clerk
-	config        shardmaster.Config // persist state
-	pendingConfig *PendingConfig     // new config
-	delta         DeltaConfig
+	name   string
+	id     int64
+	seq    int64
+	mck    *shardmaster.Clerk
+	config shardmaster.Config // persist state
+	delta  DeltaConfig
 }
 
 type appliedResult struct {
@@ -64,19 +63,10 @@ type appliedResult struct {
 	Result interface{}
 }
 
-type PendingConfig struct {
-	mu                 sync.Mutex
-	Config             shardmaster.Config
-	ShardsNeedToAdd    map[int]bool
-	ShardsNeedToDelete map[int]bool
-	IsDeleted          bool // for CAS
-	IsSynced           bool
-}
-
 type DeltaConfig struct {
 	mu      sync.Mutex
-	addDiff map[int][]int // config num -> shards need to pull
-	delDiff map[int][]int // config num -> shards need to delete
+	addDiff map[int][]int // config num -> shard need to add
+	delDiff map[int][]int // config num -> shard need to delete
 }
 
 func (kv *ShardKV) getFmtKey(args *GetArgs) string {
@@ -180,13 +170,12 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
-// RPC handle for migrating shards
+// RPC handle for migrating shard
 func (kv *ShardKV) MigrateShard(args *MigrateShardArgs, reply *MigrateShardReply) {
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		reply.WrongLeader = true
 		return
 	}
-	defer log.Printf("Migrate me-cfgn: %#v-%#v, args: %#v, reply: %#v\n", kv.name, kv.config.Num, args, reply)
 
 	kv.mu.Lock()
 	if args.ConfigNum > kv.config.Num {
@@ -196,7 +185,7 @@ func (kv *ShardKV) MigrateShard(args *MigrateShardArgs, reply *MigrateShardReply
 	}
 	kv.mu.Unlock()
 
-	// agree on deleted shards
+	// agree on deleted shard
 	cmd := *args
 loop:
 	for {
@@ -272,7 +261,9 @@ func (kv *ShardKV) SyncShard(args *SyncShardArgs, reply *SyncShardReply) {
 		if _, ok := kv.notices[index]; !ok {
 			kv.notices[index] = sync.NewCond(&kv.mu)
 		}
+		log.Printf("Op \"SyncShard\" %#v stuck at here, index:%#v, isLeader: %#v\n", kv.name, index, isLeader)
 		kv.notices[index].Wait()
+		log.Printf("Op \"SyncShard\" %#v waked up at here, index:%#v, isLeader: %#v\n", kv.name, index, isLeader)
 
 		ret := kv.appliedCmds[index]
 		k := kv.syncShardFmtKey(args)
@@ -341,13 +332,14 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 		kv.mu.Unlock()
 	case SyncShardArgs:
 		args := cmd.(SyncShardArgs)
-		log.Printf("Op \"SyncShard\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-seq:%#v-%#v, get values: %#v",
-			kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.Seq, args.Data)
+		log.Printf("Op \"SyncShard\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-seq-name:%#v-%#v-%#v, get values: %#v\n",
+			kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.Seq, args.ClientName, args.Data)
 		reply := kv.syncShard(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{
 			Key:    kv.syncShardFmtKey(&args),
 			Result: reply,
 		}
+		kv.trySnapshot(index)
 		if _, ok := kv.notices[index]; ok {
 			kv.mu.Unlock()
 			kv.notices[index].Broadcast()
@@ -361,6 +353,7 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 			Key:    kv.migrateShardFmtKey(&args),
 			Result: reply,
 		}
+		kv.trySnapshot(index)
 		if _, ok := kv.notices[index]; ok {
 			kv.mu.Unlock()
 			kv.notices[index].Broadcast()
@@ -369,11 +362,14 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 		}
 	case InstallConfigArgs:
 		args := cmd.(InstallConfigArgs)
+		log.Printf("Op \"InstallConfig\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-clientName:%#v-%#v\n",
+			kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.ClientName)
 		reply := kv.installConfig(&args, index, isLeader)
 		kv.appliedCmds[index] = &appliedResult{
 			Key:    kv.installConfigFmtKey(&args),
 			Result: reply,
 		}
+		kv.trySnapshot(index)
 		if _, ok := kv.notices[index]; ok {
 			kv.mu.Unlock()
 			kv.notices[index].Broadcast()
@@ -388,9 +384,13 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 
 func (kv *ShardKV) get(args *GetArgs, index int, isLeader bool) GetReply {
 	if kv.config.Shards[key2shard(args.Key)] != kv.gid {
+		log.Printf("Op Get at %#v, kv.configNum-arg.config:%#v-%#v, key-gid-kvgid:%#v-%#v-%#v\n",
+			kv.name, kv.config.Num, args.ConfigNum, args.Key, key2shard(args.Key), kv.gid)
 		return GetReply{Value: "", Err: ErrWrongGroup}
 	}
 	if value, ok := kv.db[key2shard(args.Key)][args.Key]; !ok {
+		log.Printf("Op Get at %#v, kv.configNum-arg.config:%#v-%#v, key-gid-kvgid:%#v-%#v-%#v\n, no-value",
+			kv.name, kv.config.Num, args.ConfigNum, args.Key, key2shard(args.Key), kv.gid)
 		return GetReply{Value: "", Err: ErrNoKey}
 	} else {
 		log.Printf("Op Get at %#v, kv.configNum-arg.config:%#v-%#v, key:%#v value:%#v, clientId-seq-index:%#v-%#v-%#v, %#v\n",
@@ -400,8 +400,6 @@ func (kv *ShardKV) get(args *GetArgs, index int, isLeader bool) GetReply {
 }
 
 func (kv *ShardKV) putAppend(args *PutAppendArgs, index int, isLeader bool) PutAppendReply {
-	// if kv.config.Num < args.ConfigNum || kv.config.Shards[key2shard(args.Key)] != kv.gid {
-	// }
 	if !(kv.config.Num == args.ConfigNum && kv.config.Shards[key2shard(args.Key)] == kv.gid) {
 		log.Printf("Op %#v at %#v, kv.configNum-arg.config:%#v-%#v, key:%#v, value:%#v, client:%#v, seq:%#v, original:%#v, clientId-seq-index:%#v-%#v-%#v, %#v, gid-kv.gid:%#v-%#v\n",
 			args.Op, kv.name, kv.config.Num, args.ConfigNum, args.Key, args.Value, args.ClientId, args.Seq, kv.db[key2shard(args.Key)][args.Key], args.ClientId, args.Seq, index, isLeader, kv.config.Shards[key2shard(args.Key)], kv.gid)
@@ -412,7 +410,7 @@ func (kv *ShardKV) putAppend(args *PutAppendArgs, index int, isLeader bool) PutA
 	if diff, ok := kv.delta.delDiff[args.ConfigNum]; ok {
 		for _, shard := range diff {
 			if shard == key2shard(args.Key) {
-				panic("Pulled!")
+				log.Printf("diff: %#v, shard: %#v, args: %#v, kv.config:%#v\n", diff, key2shard(args.Key), args, kv.config)
 				kv.delta.mu.Unlock()
 				return PutAppendReply{Err: ErrWrongGroup}
 			}
@@ -454,9 +452,6 @@ func (kv *ShardKV) syncShard(args *SyncShardArgs, index int, isLeader bool) Sync
 	}
 	kv.clientSeqs[args.ClientId] = args.Seq
 
-	if args.ConfigNum != kv.config.Num { // check arg
-		// log.Fatalf("%#v %#v %#v", args.Config.Num, args.ConfigNum, kv.config.Num)
-	}
 	kv.delta.mu.Lock()
 	if _, ok := kv.delta.addDiff[args.ConfigNum]; !ok {
 		kv.delta.addDiff[args.ConfigNum] = []int{}
@@ -475,7 +470,6 @@ loop:
 }
 
 func (kv *ShardKV) migrateShard(args *MigrateShardArgs, index int, isLeader bool) MigrateShardReply {
-	// TODO: persist deleted shards state
 	kv.delta.mu.Lock()
 	if _, ok := kv.delta.delDiff[args.ConfigNum]; !ok {
 		kv.delta.delDiff[args.ConfigNum] = []int{}
@@ -489,6 +483,7 @@ loop:
 		}
 		kv.delta.delDiff[args.ConfigNum] = append(kv.delta.delDiff[args.ConfigNum], shard)
 	}
+	log.Printf("%#v at config: %#v Migrated shards: %#v, kv.config:%#v\n", kv.name, args, kv.delta.delDiff[args.ConfigNum], kv.config)
 	kv.delta.mu.Unlock()
 
 	return MigrateShardReply{}
@@ -498,7 +493,7 @@ func (kv *ShardKV) installConfig(args *InstallConfigArgs, index int, isLeader bo
 	if args.Config.Num-1 == kv.config.Num {
 		kv.config = args.Config
 	} else {
-		panic("WTF")
+		// panic("what?")
 	}
 	return InstallConfigReply{Err: OK}
 }
@@ -595,50 +590,49 @@ func (kv *ShardKV) pullShard(args *MigrateShardArgs, reply *MigrateShardReply, g
 
 func (kv *ShardKV) calcDiff(config shardmaster.Config) (map[int]bool, map[int]bool) {
 	var (
-		shardsOfOriginConfig = map[int]bool{}
-		shardsOfNewConfig    = map[int]bool{}
-		shardsOfIntersection = map[int]bool{}
-		shardsNeedToAdd      = map[int]bool{}
-		shardsNeedToDelete   = map[int]bool{}
+		shardOfOldConfig  = map[int]bool{}
+		shardOfNewConfig  = map[int]bool{}
+		shardOfBothConfig = map[int]bool{}
+		shardNeedToAdd    = map[int]bool{}
+		shardNeedToDel    = map[int]bool{}
 	)
 	for i := 0; i < shardmaster.NShards; i++ {
 		if kv.config.Shards[i] == kv.gid {
-			shardsOfOriginConfig[i] = true
+			shardOfOldConfig[i] = true
 		}
 		if config.Shards[i] == kv.gid {
-			shardsOfNewConfig[i] = true
+			shardOfNewConfig[i] = true
 		}
 		if kv.config.Shards[i] == kv.gid && config.Shards[i] == kv.gid {
-			shardsOfIntersection[i] = true
+			shardOfBothConfig[i] = true
 		}
 	}
-	for shard, _ := range shardsOfNewConfig {
-		if _, ok := shardsOfIntersection[shard]; !ok {
-			shardsNeedToAdd[shard] = true
+	for shard, _ := range shardOfNewConfig {
+		if _, ok := shardOfBothConfig[shard]; !ok {
+			shardNeedToAdd[shard] = true
 		}
 	}
-	for shard, _ := range shardsOfOriginConfig {
-		if _, ok := shardsOfIntersection[shard]; !ok {
-			shardsNeedToDelete[shard] = true
+	for shard, _ := range shardOfOldConfig {
+		if _, ok := shardOfBothConfig[shard]; !ok {
+			shardNeedToDel[shard] = true
 		}
 	}
-	return shardsNeedToAdd, shardsNeedToDelete
+	return shardNeedToAdd, shardNeedToDel
 }
 
-func (kv *ShardKV) pullAndSyncShards(config shardmaster.Config) bool {
+func (kv *ShardKV) pullAndSyncShard(config shardmaster.Config) bool {
 	kv.mu.Lock()
-	shardsNeedToAdd, shardsNeedToDelete := kv.calcDiff(config)
-	// create pending config
-	kv.pendingConfig = &PendingConfig{
-		mu:                 sync.Mutex{},
-		Config:             config,
-		ShardsNeedToAdd:    shardsNeedToAdd,
-		ShardsNeedToDelete: shardsNeedToDelete,
-		IsDeleted:          false,
-		IsSynced:           false,
+	if kv.config.Num == 0 {
+		kv.mu.Unlock()
+		return true // new config is 1
+	}
+	if kv.config.Num+1 != config.Num {
+		kv.mu.Unlock()
+		return false // error new config, repoll
 	}
 
-	// RPC parameter for sync data shards
+	shardNeedToAdd, _ := kv.calcDiff(config)
+	// RPC parameter for sync data shard
 	mtx := sync.Mutex{}
 	syncShardArgs := SyncShardArgs{
 		Data:       make([]map[string]string, shardmaster.NShards),
@@ -648,16 +642,17 @@ func (kv *ShardKV) pullAndSyncShards(config shardmaster.Config) bool {
 		Config:     config,        // new config
 		ClientId:   kv.id,
 		Seq:        kv.seq,
+		ClientName: kv.name,
 	}
 	kv.seq += 1
-	kv.mu.Unlock()
+	oldConfigNum := kv.config.Num
 	for shard := 0; shard < shardmaster.NShards; shard++ {
 		syncShardArgs.Data[shard] = make(map[string]string)
 	}
 
-	// pull shards from other group
+	// pull shard from other group
 	gidToShards := map[int][]int{}
-	for shard, _ := range shardsNeedToAdd {
+	for shard, _ := range shardNeedToAdd {
 		gid := kv.config.Shards[shard]
 		if _, ok := gidToShards[gid]; !ok {
 			gidToShards[gid] = []int{shard}
@@ -665,50 +660,45 @@ func (kv *ShardKV) pullAndSyncShards(config shardmaster.Config) bool {
 			gidToShards[gid] = append(gidToShards[gid], shard)
 		}
 	}
+	kv.mu.Unlock()
 	log.Printf("At %#v, Old config: %#v, new config: %#v, gidToShards: %#v\n", kv.name, kv.config, config, gidToShards)
-	if kv.config.Num != 0 {
-		var wg sync.WaitGroup
-		for k := range gidToShards {
-			gid, shards := k, gidToShards[k] // local variable for goroutine
-			wg.Add(1)
-			go func(wg *sync.WaitGroup) {
-				defer wg.Done()
-				kv.mu.Lock()
-				args := MigrateShardArgs{
-					Shards:    shards,
-					ConfigNum: kv.config.Num, // old config
-					ClientId:  kv.id,
-					Seq:       kv.seq,
-					Name:      kv.name,
+	var wg sync.WaitGroup
+	for k := range gidToShards {
+		gid, shard := k, gidToShards[k] // local variable for goroutine
+		wg.Add(1)
+		go func(wg *sync.WaitGroup) {
+			defer wg.Done()
+			kv.mu.Lock()
+			args := MigrateShardArgs{
+				Shards:    shard,
+				ConfigNum: oldConfigNum, // old config
+				ClientId:  kv.id,
+				Seq:       kv.seq,
+				Name:      kv.name,
+			}
+			kv.seq += 1
+			kv.mu.Unlock()
+			reply := MigrateShardReply{}
+			kv.pullShard(&args, &reply, gid)
+			mtx.Lock()
+			defer mtx.Unlock()
+			for shard, kv := range reply.Data { // index as shard
+				for k, v := range kv {
+					syncShardArgs.Data[shard][k] = v
 				}
-				kv.seq += 1
-				kv.mu.Unlock()
-				reply := MigrateShardReply{}
-				kv.pullShard(&args, &reply, gid)
-				mtx.Lock()
-				defer mtx.Unlock()
-				for shard, kv := range reply.Data { // index as shard
-					for k, v := range kv {
-						syncShardArgs.Data[shard][k] = v
-					}
-					syncShardArgs.Shards = append(syncShardArgs.Shards, shard)
+				syncShardArgs.Shards = append(syncShardArgs.Shards, shard)
+			}
+			for clientId, seq := range reply.ClientSeqs {
+				if seq1, ok := syncShardArgs.ClientSeqs[clientId]; !ok || seq1 < seq {
+					syncShardArgs.ClientSeqs[clientId] = seq
 				}
-				for clientId, seq := range reply.ClientSeqs {
-					if seq1, ok := syncShardArgs.ClientSeqs[clientId]; !ok || seq1 < seq {
-						syncShardArgs.ClientSeqs[clientId] = seq
-					}
-				}
-			}(&wg)
-		}
-		wg.Wait()
-	} else {
-		for shard := 0; shard < shardmaster.NShards; shard++ {
-			syncShardArgs.Shards = append(syncShardArgs.Shards, shard)
-		}
+			}
+		}(&wg)
 	}
+	wg.Wait()
 
-	// sync shards to group members
-	log.Printf("At %#v, pulled shards: %#v\n", kv.name, syncShardArgs)
+	// sync shard to group members
+	log.Printf("At %#v, pulled shard: %#v\n", kv.name, syncShardArgs)
 	syncShardReply := SyncShardReply{}
 	kv.SyncShard(&syncShardArgs, &syncShardReply)
 	if syncShardReply.WrongLeader {
@@ -721,16 +711,16 @@ func (kv *ShardKV) pollConfig(ms int) {
 	for {
 		select {
 		case <-time.After(time.Duration(ms) * time.Millisecond):
-			latestConfig := kv.mck.Query(-1)
-			for i := kv.config.Num + 1; i <= latestConfig.Num; i++ {
-				newConfig := kv.mck.Query(i)
-				if _, isLeader := kv.rf.GetState(); isLeader {
-					if !kv.pullAndSyncShards(newConfig) {
+			if _, isLeader := kv.rf.GetState(); isLeader {
+				latestConfig := kv.mck.Query(-1)
+				for i := kv.config.Num + 1; i <= latestConfig.Num; i++ {
+					newConfig := kv.mck.Query(i)
+					if !kv.pullAndSyncShard(newConfig) {
 						break // repoll
 					}
-				}
-				if !kv.checkAndInstallNewConfig(newConfig) {
-					break // repoll
+					if !kv.checkAndInstallNewConfig(newConfig) {
+						break // repoll from kv.config
+					}
 				}
 			}
 		}
@@ -739,9 +729,8 @@ func (kv *ShardKV) pollConfig(ms int) {
 
 func (kv *ShardKV) checkAndInstallNewConfig(config shardmaster.Config) bool {
 	kv.mu.Lock()
-	shardsNeedToAdd, shardsNeedToDelete := kv.calcDiff(config)
-
-	checkIsReady := func(shards []int, diff map[int]bool) bool {
+	shardNeedToAdd, shardNeedToDel := kv.calcDiff(config)
+	checkIsNotReady := func(shards []int, diff map[int]bool) bool {
 		kv.delta.mu.Lock()
 		defer kv.delta.mu.Unlock()
 		mustCnt, hasCnt := 0, 0
@@ -756,58 +745,23 @@ func (kv *ShardKV) checkAndInstallNewConfig(config shardmaster.Config) bool {
 		}
 		return mustCnt != hasCnt
 	}
-	if checkIsReady(kv.delta.addDiff[kv.config.Num], shardsNeedToAdd) ||
-		checkIsReady(kv.delta.delDiff[kv.config.Num], shardsNeedToDelete) {
+	if (checkIsNotReady(kv.delta.addDiff[kv.config.Num], shardNeedToAdd) ||
+		checkIsNotReady(kv.delta.delDiff[kv.config.Num], shardNeedToDel)) && kv.config.Num != 0 {
+		log.Printf("stuck at here")
 		kv.mu.Unlock()
 		return false
 	}
 	kv.mu.Unlock()
 
-	// mustCnt, hasCnt := 0, 0
-	// for shard, _ := range shardsNeedToAdd {
-	// 	mustCnt += 1
-	// 	for _, shard1 := range kv.delta.addDiff[kv.config.Num] {
-	// 		if shard == shard1 {
-	// 			hasCnt += 1
-	// 			break
-	// 		}
-	// 	}
-	// }
-	// kv.mu.Unlock()
-	// // log.Fatalf("%#v %#v\n", mustCnt, hasCnt)
-	// if mustCnt != hasCnt {
-	// 	return false
-	// }
-
-	// kv.mu.Lock()
-	// mustCnt, hasCnt = 0, 0
-	// for shard, _ := range shardsNeedToDelete {
-	// 	mustCnt += 1
-	// 	for _, shard1 := range kv.delta.delDiff[kv.config.Num] {
-	// 		if shard == shard1 {
-	// 			hasCnt += 1
-	// 			break
-	// 		}
-	// 	}
-	// }
-	// kv.mu.Unlock()
-	// // log.Fatalf("%#v %#v\n", mustCnt, hasCnt)
-	// if mustCnt != hasCnt {
-	// 	return false
-	// }
-	// log.Printf("Node %#v, OLD %#v, NEW %#v\n", kv.name, kv.config, config)
-
-	// if false {
-	// 	kv.config = config // install new config
-	// 	return true
-	// }
-
-	// leader propose new config
+	// leader proposes new config
 	if _, isLeader := kv.rf.GetState(); !isLeader {
-		return false // reinstall by another leader
+		return false // reinstall by leader of another term
 	}
+	old := kv.config
 	cmd := InstallConfigArgs{
-		Config: config,
+		Config:     config,
+		ClientId:   kv.id,
+		ClientName: kv.name,
 	}
 	reply := &InstallConfigReply{
 		Err: OK,
@@ -823,7 +777,9 @@ func (kv *ShardKV) checkAndInstallNewConfig(config shardmaster.Config) bool {
 		if _, ok := kv.notices[index]; !ok {
 			kv.notices[index] = sync.NewCond(&kv.mu)
 		}
+		log.Printf("Op \"InstallConfig\", %#v stuck at here, index:%#v, isLeader: %#v\n", kv.name, index, isLeader)
 		kv.notices[index].Wait()
+		log.Printf("Op \"InstallConfig\", %#v waked at here, index:%#v, isLeader: %#v\n", kv.name, index, isLeader)
 
 		ret := kv.appliedCmds[index]
 		k := kv.installConfigFmtKey(&cmd)
@@ -831,6 +787,7 @@ func (kv *ShardKV) checkAndInstallNewConfig(config shardmaster.Config) bool {
 			switch ret.Result.(type) {
 			case InstallConfigReply:
 				*reply = ret.Result.(InstallConfigReply)
+				log.Printf("Node %#v, OLD: %#v, NEW: %#v\n", kv.name, old, kv.config)
 				kv.mu.Unlock()
 				return true // installed
 			default:
@@ -927,7 +884,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		delDiff: map[int][]int{},
 	}
 	kv.readSnapshot(kv.persister.ReadSnapshot())
-	log.Printf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v\n", kv.name, kv.db, -1)
+	log.Printf("Op \"StartServer\" at %#v, config: %#v, get values: %#v\n", kv.name, kv.config, kv.db)
 
 	kv.mck = shardmaster.MakeClerk(kv.masters)
 	kv.id = nrand()

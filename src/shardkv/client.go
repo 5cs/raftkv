@@ -129,9 +129,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		for i := 0; i < len(servers); i++ {
 			srv := ck.make_end(servers[i])
 			reply := PutAppendReply{}
-			// log.Printf("PutAppend %#v to:%#v, args:%#v\n", servers, servers[i], args)
 			ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-			// log.Printf("reply %#v:%#v\n", servers[i], reply)
 			if ok && (reply.Err == OK) {
 				return
 			} else if ok && reply.Err == ErrWrongGroup {

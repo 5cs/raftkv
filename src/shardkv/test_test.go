@@ -332,58 +332,32 @@ func TestConcurrent1(t *testing.T) {
 	}
 
 	time.Sleep(150 * time.Millisecond)
-	// cfg.masterservers[0].DumpMasterServer()
-	// cfg.masterservers[1].DumpMasterServer()
-	// cfg.masterservers[2].DumpMasterServer()
 
 	cfg.join(1)
 	time.Sleep(500 * time.Millisecond)
 	log.Printf("TEST 1, 1 joined\n")
-	// cfg.masterservers[0].DumpMasterServer()
-	// cfg.masterservers[1].DumpMasterServer()
-	// cfg.masterservers[2].DumpMasterServer()
 	cfg.join(2)
 	time.Sleep(500 * time.Millisecond)
-	log.Printf("TEST 2, 2 joined\n")
-	// cfg.masterservers[0].DumpMasterServer()
-	// cfg.masterservers[1].DumpMasterServer()
-	// cfg.masterservers[2].DumpMasterServer()
 	cfg.leave(0)
-	// cfg.masterservers[0].DumpMasterServer()
-	// cfg.masterservers[1].DumpMasterServer()
-	// cfg.masterservers[2].DumpMasterServer()
 
 	cfg.ShutdownGroup(0)
 	time.Sleep(100 * time.Millisecond)
-	log.Printf("TEST 3, 0 leaved and group 0 shutted down\n")
-	// cfg.masterservers[0].DumpMasterServer()
-	// cfg.masterservers[1].DumpMasterServer()
-	// cfg.masterservers[2].DumpMasterServer()
 	cfg.ShutdownGroup(1)
 	time.Sleep(100 * time.Millisecond)
-	log.Printf("TEST 4, group 1 shutted down\n")
-	// cfg.masterservers[0].DumpMasterServer()
-	// cfg.masterservers[1].DumpMasterServer()
-	// cfg.masterservers[2].DumpMasterServer()
 	cfg.ShutdownGroup(2)
-	log.Printf("TEST 5, group 2 shutted down\n")
 
 	cfg.leave(2)
-	log.Printf("TEST 6, group 2 leaved\n")
 
 	time.Sleep(100 * time.Millisecond)
 	cfg.StartGroup(0)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
-	log.Printf("TEST 7, group 0,1,2 started up\n")
 
 	time.Sleep(100 * time.Millisecond)
 	cfg.join(0)
 	cfg.leave(1)
-	log.Printf("TEST 8, group 0 joined, group 1 leaved\n")
 	time.Sleep(500 * time.Millisecond)
 	cfg.join(1)
-	log.Printf("TEST 9, group 1 joined\n")
 
 	time.Sleep(1 * time.Second)
 
@@ -411,9 +385,9 @@ func TestConcurrent2(t *testing.T) {
 
 	ck := cfg.makeClient()
 
-	cfg.join(1)
-	cfg.join(0)
-	cfg.join(2)
+	cfg.join(1) // 1
+	cfg.join(0) // 2
+	cfg.join(2) // 3
 
 	n := 10
 	ka := make([]string, n)
@@ -431,7 +405,7 @@ func TestConcurrent2(t *testing.T) {
 		defer func() { ch <- true }()
 		for atomic.LoadInt32(&done) == 0 {
 			x := randstring(1)
-			ck1.Append(ka[i], x)
+			ck1.Append(ka[i], x) // TODO: fix dead lock
 			va[i] += x
 			time.Sleep(50 * time.Millisecond)
 		}
@@ -442,23 +416,28 @@ func TestConcurrent2(t *testing.T) {
 		go ff(i, ck1)
 	}
 
-	cfg.leave(0)
-	cfg.leave(2)
+	cfg.leave(0) // 4
+	cfg.leave(2) // 5
 	time.Sleep(3000 * time.Millisecond)
-	cfg.join(0)
-	cfg.join(2)
-	cfg.leave(1)
+	cfg.join(0)  // 6
+	cfg.join(2)  // 7
+	cfg.leave(1) // 8
 	time.Sleep(3000 * time.Millisecond)
-	cfg.join(1)
-	cfg.leave(0)
-	cfg.leave(2)
+	cfg.join(1)  // 9
+	cfg.leave(0) // 10
+	cfg.leave(2) // 11
 	time.Sleep(3000 * time.Millisecond)
 
+	log.Printf("TEST After config 11\n")
 	cfg.ShutdownGroup(1)
+	log.Printf("TEST group 101 shut down\n")
 	cfg.ShutdownGroup(2)
+	log.Printf("TEST group 102 shut down\n")
 	time.Sleep(1000 * time.Millisecond)
-	cfg.StartGroup(1)
-	cfg.StartGroup(2)
+	cfg.StartGroup(1) // replay log when snapshotting is disabled
+	log.Printf("TEST group 101 start up\n")
+	cfg.StartGroup(2) // replay log
+	log.Printf("TEST group 102 start up\n")
 
 	time.Sleep(2 * time.Second)
 
