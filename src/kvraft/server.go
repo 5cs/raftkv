@@ -12,7 +12,7 @@ import (
 	// "time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -153,6 +153,10 @@ func (kv *KVServer) Kill() {
 	// Your code here, if desired.
 }
 
+func (kv *KVServer) Name() string {
+	return fmt.Sprintf("%#v", kv.me)
+}
+
 // Apply method for Raft
 func (kv *KVServer) Apply(applyMsg interface{}) {
 	kv.mu.Lock()
@@ -187,6 +191,7 @@ func (kv *KVServer) Apply(applyMsg interface{}) {
 			Key:    putAppendFmtKey(&args),
 			Result: reply,
 		}
+		kv.trySnapshot(index)
 		if _, ok := kv.notices[index]; ok {
 			kv.mu.Unlock()
 			kv.notices[index].Broadcast()
@@ -206,47 +211,12 @@ func (kv *KVServer) Apply(applyMsg interface{}) {
 }
 
 func (kv *KVServer) trySnapshot(index int) {
-	if !((kv.maxraftstate != -1 &&
-		float64(kv.persister.RaftStateSize()) >= float64(kv.maxraftstate)*0.8) ||
-		(kv.restart && kv.lastIncludedIndex > 0)) {
+	if !(kv.maxraftstate != -1 &&
+		float64(kv.persister.RaftStateSize()) >= float64(kv.maxraftstate)*0.8) {
 		return
 	}
-	kv.restart = false
 
-	var (
-		lastIncludedIndex int = 0
-		lastIncludedTerm  int = 0
-	)
 	logs := kv.rf.GetLog()
-	state := kv.persister.ReadSnapshot()
-	r := bytes.NewBuffer(state)
-	d := labgob.NewDecoder(r)
-	if kv.persister.SnapshotSize() != 0 &&
-		(d.Decode(&lastIncludedIndex) != nil ||
-			d.Decode(&lastIncludedTerm) != nil) {
-		return
-	}
-
-	for i := lastIncludedIndex + 1; i <= index; i++ {
-		logEntry := logs[kv.rf.Index(i)]
-		switch logEntry.Command.(type) {
-		case PutAppendArgs:
-			cmd := logEntry.Command.(PutAppendArgs)
-			if seq, ok := kv.clientSeqs[cmd.ClientId]; ok && seq >= cmd.Seq {
-				continue
-			}
-			kv.clientSeqs[cmd.ClientId] = cmd.Seq
-			if cmd.Op == "Put" {
-				kv.db[cmd.Key] = cmd.Value
-			} else if cmd.Op == "Append" {
-				kv.db[cmd.Key] += cmd.Value
-			} else {
-				panic("Can't happen")
-			}
-		default:
-		}
-	}
-
 	kv.lastIncludedIndex = index
 	kv.lastIncludedTerm = logs[kv.rf.Index(index)].Term
 	kv.persist()
@@ -287,12 +257,8 @@ func (kv *KVServer) readSnapshot(data []byte) {
 
 func (kv *KVServer) putAppend(args *PutAppendArgs, index int, isLeader bool) PutAppendReply {
 	if seq, ok := kv.clientSeqs[args.ClientId]; ok && seq >= args.Seq {
-		DPrintf("Op %#v at %#v, key:%#v, value:%#v, client:%#v, seq:%#v, original:%#v, clientId-seq-index:%#v-%#v-%#v, %#v, filtered by %#v\n",
-			args.Op, kv.rf.GetRaftInstanceName(), args.Key, args.Value, args.ClientId, args.Seq, kv.db[args.Key], args.ClientId, args.Seq, index, isLeader, seq)
 		return PutAppendReply{Err: OK}
 	}
-	DPrintf("Op %#v at %#v, key:%#v, value:%#v, client:%#v, seq:%#v, original:%#v, clientId-seq-index:%#v-%#v-%#v, %#v\n",
-		args.Op, kv.rf.GetRaftInstanceName(), args.Key, args.Value, args.ClientId, args.Seq, kv.db[args.Key], args.ClientId, args.Seq, index, isLeader)
 	kv.clientSeqs[args.ClientId] = args.Seq
 	if args.Op == "Put" {
 		kv.db[args.Key] = args.Value
@@ -306,8 +272,6 @@ func (kv *KVServer) get(args *GetArgs, index int, isLeader bool) GetReply {
 	if value, ok := kv.db[args.Key]; !ok {
 		return GetReply{Value: "", Err: ErrNoKey}
 	} else {
-		DPrintf("Op Get at %#v, key:%#v value:%#v, clientId-seq-index:%#v-%#v-%#v, %#v\n",
-			kv.rf.GetRaftInstanceName(), args.Key, value, args.ClientId, args.Seq, index, isLeader)
 		return GetReply{Value: value, Err: OK}
 	}
 }
@@ -352,7 +316,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.notices = make(map[int]*sync.Cond)
 	kv.appliedCmds = make(map[int]*appliedResult)
 	kv.readSnapshot(kv.persister.ReadSnapshot())
-	kv.restart = true
 	DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v\n", kv.rf.GetRaftInstanceName(), kv.db, -1)
 
 	// server loop

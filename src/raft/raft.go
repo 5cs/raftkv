@@ -118,11 +118,18 @@ func (rf *Raft) SetApp(app app.Applier) {
 	rf.app = app
 }
 
+func (rf *Raft) GetLastApplied() int {
+	return rf.lastApplied
+}
+
 func (rf *Raft) GetLog() []LogEntry {
 	return rf.log
 }
 
 func (rf *Raft) TruncateLog(i int) {
+	if rf.Index(i) < 0 || rf.Index(i) >= len(rf.log) {
+		return
+	}
 	lastExcludedLog := rf.log[rf.Index(i)]
 	rf.log = rf.log[rf.Index(i)+1:]
 	rf.lastExcludedTerm = lastExcludedLog.Term
@@ -312,13 +319,10 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 	} else { // args.Term == rf.currentTerm (may candidate) || args.Term > rf.currentTerm
-		currentTerm := rf.currentTerm
-		reason := ""
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
 		if args.PrevLogIndex == 0 {
 			reply.Success = true // no prev anymore
-			reason = "args.PrevLogIndex: 0"
 		} else if rf.Len() == 0 {
 			reply.Success = false // has prev, but my log is empty
 			reply.ConflictIndex = 1
@@ -336,14 +340,12 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 						j -= 1
 					}
 					reply.ConflictIndex = j + 1 + rf.lastExcludedIndex
-				} else { // if prevLog.Term == args.PrevLogTerm {
+				} else {
 					reply.Success = true
-					reason = fmt.Sprintf("prevLog.Term-args.PrevLogTerm:%#v-%#v", prevLog.Term, args.PrevLogTerm)
 				}
 			} else if args.PrevLogIndex == rf.lastExcludedIndex &&
 				args.PrevLogTerm == rf.lastExcludedTerm {
 				reply.Success = true // snapshotted, prevlog match lastExcludedLog, reply true
-				reason = fmt.Sprintf("rf.lastExcludedIndex-rf.lastExcludedTerm:%#v-%#v", rf.lastExcludedIndex, rf.lastExcludedTerm)
 			} else { // snapshotted, reply false, let leader do consistency check from lastExcludedIndex
 				reply.Success = false
 				reply.ConflictIndex = rf.lastExcludedIndex + 1
@@ -355,8 +357,6 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		// update log state
 		if reply.Success {
 			// append entries
-			DPrintf("Raft %#v[req:%#v] appendEntries, reqPrevLogIndex-reqPrevLogTerm-reqLeaderCommit:%#v-%#v-%#v, args.Term-rf.currentTerm:%#v-%#v, reason is %#v\n",
-				rf.me, args.ReqId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Term, currentTerm, reason)
 			if rf.Index(args.PrevLogIndex) >= -1 {
 				rf.log = rf.log[:rf.Index(args.PrevLogIndex)+1]
 			}
@@ -520,19 +520,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntryArgs, reply *Appe
 // sendInstallSnapshot
 //
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	var (
-		lastIncludedIndex int = 0
-		lastIncludedTerm  int = 0
-	)
-	keyValueStore := make(map[string]string)
-	clientSeqs := make(map[int64]int64)
-	r := bytes.NewBuffer(args.Data)
-	d := labgob.NewDecoder(r)
-	d.Decode(&lastIncludedIndex)
-	d.Decode(&lastIncludedTerm)
-	d.Decode(&clientSeqs)
-	d.Decode(&keyValueStore)
-	DPrintf("Send install snapshot from %#v to %#v with kv: %#v, reqId: %#v\n", rf.me, server, keyValueStore, args.ReqId)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
@@ -883,8 +870,6 @@ func (rf *Raft) leaderLoop() {
 					} else {
 						// consistency check
 						if reply.Success && rf.nextIndex[i]-1 == args.PrevLogIndex {
-							DPrintf("Raft %#v[req:%#v] consistency check of nextIndex[%#v]:%#v, reqPrevLogIndex-reqPrevLogTerm-reqLeaderCommit:%#v-%#v-%#v, reply.Term-rf.currentTerm:%#v-%#v\n",
-								rf.me, args.ReqId, i, rf.nextIndex[i], args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, reply.Term, rf.currentTerm)
 							rf.nextIndex[i] += len(args.Entries)
 							if len(args.Entries) != 0 {
 								rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
@@ -992,8 +977,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.mu.Lock()
 			rf.state = state
 			if rf.state == LEADER {
+				if rf.app != nil {
+					DPrintf("Raft leader at %#v is %#v, %#v\n", rf.currentTerm, rf.me, rf.app.Name())
+				} else {
+					DPrintf("Raft leader at %#v is %#v\n", rf.currentTerm, rf.me)
+				}
 				rf.mu.Unlock()
-				DPrintf("Raft leader at %#v is %#v\n", rf.currentTerm, rf.me)
 				rf.leaderLoop()
 			} else {
 				rf.mu.Unlock()

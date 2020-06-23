@@ -1,5 +1,7 @@
 package shardkv
 
+import "shardmaster"
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running op-at-a-time paxos.
@@ -29,7 +31,6 @@ type PutAppendArgs struct {
 	ClientId  int64
 	Seq       int64
 	ConfigNum int
-	Shard     int
 }
 
 type PutAppendReply struct {
@@ -43,7 +44,6 @@ type GetArgs struct {
 	ClientId  int64
 	Seq       int64
 	ConfigNum int
-	Shard     int
 }
 
 type GetReply struct {
@@ -52,13 +52,44 @@ type GetReply struct {
 	Value       string
 }
 
-// storage format
-type KeyValue struct {
-	Key   string
-	Value string
+type MigrateShardArgs struct {
+	Shards    []int
+	ConfigNum int
+	ClientId  int64
+	Seq       int64
+	Name      string
 }
 
-type ClientSeq struct {
-	ClientId int64
-	Seq      int64
+type MigrateShardReply struct {
+	Data        []map[string]string
+	ClientSeqs  map[int64]int64
+	ConfigNum   int
+	Err         Err
+	WrongLeader bool
+}
+
+type SyncShardArgs struct {
+	Data       []map[string]string
+	ClientSeqs map[int64]int64
+	Shards     []int
+	ConfigNum  int                // prev config num
+	Config     shardmaster.Config // new config
+	ClientId   int64
+	Seq        int64
+	ClientName string
+}
+
+type SyncShardReply struct {
+	Err         Err
+	WrongLeader bool
+}
+
+type InstallConfigArgs struct {
+	Config     shardmaster.Config
+	ClientId   int64
+	ClientName string
+}
+
+type InstallConfigReply struct {
+	Err Err
 }
