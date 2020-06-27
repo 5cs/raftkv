@@ -35,6 +35,18 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
+func (ck *Clerk) getLeader() int {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	return ck.leader
+}
+
+func (ck *Clerk) setNextLeader() {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.leader = (ck.leader + 1) % len(ck.servers)
+}
+
 func (ck *Clerk) Query(num int) Config {
 	// Your code here.
 	ck.mu.Lock()
@@ -51,9 +63,7 @@ func (ck *Clerk) Query(num int) Config {
 	for {
 		select {
 		case <-time.After(100 * time.Millisecond):
-			ck.mu.Lock()
-			ck.leader = (ck.leader + 1) % len(ck.servers)
-			ck.mu.Unlock()
+			ck.setNextLeader()
 			go ck.tryQuery(done, args)
 		case reply := <-done:
 			return reply.Config
@@ -61,14 +71,13 @@ func (ck *Clerk) Query(num int) Config {
 	}
 }
 func (ck *Clerk) tryQuery(done chan QueryReply, args *QueryArgs) {
+	leader := ck.getLeader()
 	reply := &QueryReply{}
-	ck.servers[ck.leader].Call("ShardMaster.Query", args, reply)
+	ck.servers[leader].Call("ShardMaster.Query", args, reply)
 	if reply.Err == OK || reply.Err == ErrNotFound {
 		done <- *reply
 	} else if reply.WrongLeader {
-		ck.mu.Lock()
-		ck.leader = (ck.leader + 1) % len(ck.servers)
-		ck.mu.Unlock()
+		ck.setNextLeader()
 		go ck.tryQuery(done, args)
 	}
 }
@@ -89,9 +98,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	for {
 		select {
 		case <-time.After(100 * time.Millisecond):
-			ck.mu.Lock()
-			ck.leader = (ck.leader + 1) % len(ck.servers)
-			ck.mu.Unlock()
+			ck.setNextLeader()
 			go ck.tryJoin(done, args)
 		case <-done:
 			return
@@ -99,14 +106,13 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	}
 }
 func (ck *Clerk) tryJoin(done chan JoinReply, args *JoinArgs) {
+	leader := ck.getLeader()
 	reply := &JoinReply{}
-	ck.servers[ck.leader].Call("ShardMaster.Join", args, reply)
+	ck.servers[leader].Call("ShardMaster.Join", args, reply)
 	if reply.Err == OK {
 		done <- *reply
 	} else if reply.WrongLeader {
-		ck.mu.Lock()
-		ck.leader = (ck.leader + 1) % len(ck.servers)
-		ck.mu.Unlock()
+		ck.setNextLeader()
 		go ck.tryJoin(done, args)
 	}
 }
@@ -127,9 +133,7 @@ func (ck *Clerk) Leave(gids []int) {
 	for {
 		select {
 		case <-time.After(100 * time.Millisecond):
-			ck.mu.Lock()
-			ck.leader = (ck.leader + 1) % len(ck.servers)
-			ck.mu.Unlock()
+			ck.setNextLeader()
 			go ck.tryLeave(done, args)
 		case <-done:
 			return
@@ -137,14 +141,13 @@ func (ck *Clerk) Leave(gids []int) {
 	}
 }
 func (ck *Clerk) tryLeave(done chan LeaveReply, args *LeaveArgs) {
+	leader := ck.getLeader()
 	reply := &LeaveReply{}
-	ck.servers[ck.leader].Call("ShardMaster.Leave", args, reply)
+	ck.servers[leader].Call("ShardMaster.Leave", args, reply)
 	if reply.Err == OK {
 		done <- *reply
 	} else if reply.WrongLeader {
-		ck.mu.Lock()
-		ck.leader = (ck.leader + 1) % len(ck.servers)
-		ck.mu.Unlock()
+		ck.setNextLeader()
 		go ck.tryLeave(done, args)
 	}
 }
@@ -166,9 +169,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 	for {
 		select {
 		case <-time.After(100 * time.Millisecond):
-			ck.mu.Lock()
-			ck.leader = (ck.leader + 1) % len(ck.servers)
-			ck.mu.Unlock()
+			ck.setNextLeader()
 			go ck.tryMove(done, args)
 		case <-done:
 			return
@@ -176,14 +177,13 @@ func (ck *Clerk) Move(shard int, gid int) {
 	}
 }
 func (ck *Clerk) tryMove(done chan MoveReply, args *MoveArgs) {
+	leader := ck.getLeader()
 	reply := &MoveReply{}
-	ck.servers[ck.leader].Call("ShardMaster.Move", args, reply)
+	ck.servers[leader].Call("ShardMaster.Move", args, reply)
 	if reply.Err == OK {
 		done <- *reply
 	} else if reply.WrongLeader {
-		ck.mu.Lock()
-		ck.leader = (ck.leader + 1) % len(ck.servers)
-		ck.mu.Unlock()
+		ck.setNextLeader()
 		go ck.tryMove(done, args)
 	}
 }

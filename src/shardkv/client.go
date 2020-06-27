@@ -41,9 +41,10 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
-	mu  sync.Mutex
-	id  int64
-	seq int64
+	mu     sync.Mutex
+	id     int64
+	seq    int64
+	leader map[int]int
 }
 
 //
@@ -62,7 +63,18 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	// You'll have to add code here.
 	ck.id, ck.seq = nrand(), 0
 	ck.config = ck.sm.Query(-1)
+	ck.leader = map[int]int{}
+	for shard := 0; shard < len(ck.config.Shards); shard++ {
+		ck.leader[shard] = 0
+	}
 	return ck
+}
+
+func (ck *Clerk) queryLatestConfig() int {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.config = ck.sm.Query(-1)
+	return ck.config.Num
 }
 
 //
@@ -72,7 +84,6 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	shard := key2shard(key)
 	ck.mu.Lock()
 	args := GetArgs{
 		Key:       key,
@@ -83,26 +94,44 @@ func (ck *Clerk) Get(key string) string {
 	ck.seq++
 	ck.mu.Unlock()
 
+	done := make(chan GetReply, 0)
+	go ck.tryGet(done, &args)
 	for {
-		ck.mu.Lock()
-		ck.config = ck.sm.Query(-1)
-		args.ConfigNum = ck.config.Num
-		gid := ck.config.Shards[shard]
-		servers := ck.config.Groups[gid]
-		ck.mu.Unlock()
-		for i := 0; i < len(servers); i++ {
-			srv := ck.make_end(servers[i])
-			reply := GetReply{}
-			ok := srv.Call("ShardKV.Get", &args, &reply)
-			if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-				return reply.Value
-			} else if ok && reply.Err == ErrWrongGroup {
-				break
-			}
+		select {
+		case <-time.After(time.Duration(100) * time.Millisecond):
+			args.ConfigNum = ck.queryLatestConfig()
+			go ck.tryGet(done, &args)
+		case reply := <-done:
+			return reply.Value
 		}
-		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
-	return ""
+}
+
+func (ck *Clerk) tryGet(done chan GetReply, args *GetArgs) {
+	ck.mu.Lock()
+	if ck.config.Num == 0 {
+		ck.mu.Unlock()
+		return // wait valid config
+	}
+	// select leader
+	shard := key2shard(args.Key)
+	gid := ck.config.Shards[shard]
+	servers := ck.config.Groups[gid]
+	ck.leader[shard] = (ck.leader[shard] + 1) % len(servers)
+	server := servers[ck.leader[shard]]
+	srv := ck.make_end(server)
+	ck.mu.Unlock()
+
+	reply := &GetReply{}
+	ok := srv.Call("ShardKV.Get", args, reply)
+	if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+		done <- *reply
+	} else if ok && reply.WrongLeader {
+		go ck.tryGet(done, args)
+	} else if ok && reply.Err == ErrWrongGroup {
+		args.ConfigNum = ck.queryLatestConfig()
+		go ck.tryGet(done, args)
+	}
 }
 
 //
@@ -110,7 +139,6 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	shard := key2shard(key)
 	ck.mu.Lock()
 	args := PutAppendArgs{
 		Key:       key,
@@ -123,26 +151,45 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.seq++
 	ck.mu.Unlock()
 
+	done := make(chan PutAppendReply, 0)
+	go ck.tryPutAppend(done, &args)
 	for {
-		ck.mu.Lock()
-		ck.config = ck.sm.Query(-1)
-		args.ConfigNum = ck.config.Num
-		gid := ck.config.Shards[shard]
-		servers := ck.config.Groups[gid]
-		ck.mu.Unlock()
-		for i := 0; i < len(servers); i++ {
-			srv := ck.make_end(servers[i])
-			reply := PutAppendReply{}
-			ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-			if ok && (reply.Err == OK) {
-				return
-			} else if ok && reply.Err == ErrWrongGroup {
-				break
-			}
+		select {
+		case <-time.After(time.Duration(100) * time.Millisecond):
+			args.ConfigNum = ck.queryLatestConfig()
+			go ck.tryPutAppend(done, &args)
+		case <-done:
+			return
 		}
-		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 	return
+}
+
+func (ck *Clerk) tryPutAppend(done chan PutAppendReply, args *PutAppendArgs) {
+	ck.mu.Lock()
+	if ck.config.Num == 0 {
+		ck.mu.Unlock()
+		return // wait valid config
+	}
+	// select leader
+	shard := key2shard(args.Key)
+	gid := ck.config.Shards[shard]
+	servers := ck.config.Groups[gid]
+	ck.leader[shard] = (ck.leader[shard] + 1) % len(servers)
+	server := servers[ck.leader[shard]]
+	srv := ck.make_end(server)
+	ck.mu.Unlock()
+
+	reply := &PutAppendReply{}
+	ok := srv.Call("ShardKV.PutAppend", args, reply)
+	if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+		done <- *reply
+	} else if ok && reply.WrongLeader {
+		go ck.tryPutAppend(done, args)
+	} else if ok && reply.Err == ErrWrongGroup {
+		args.ConfigNum = ck.queryLatestConfig()
+		go ck.tryPutAppend(done, args)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

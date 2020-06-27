@@ -53,11 +53,11 @@ type GetReply struct {
 }
 
 type MigrateShardArgs struct {
-	Shards    []int
-	ConfigNum int
-	ClientId  int64
-	Seq       int64
-	Name      string
+	Shards     []int
+	ConfigNum  int
+	ClientId   int64
+	Seq        int64
+	ClientName string
 }
 
 type MigrateShardReply struct {

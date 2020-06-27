@@ -201,7 +201,7 @@ func (kv *KVServer) Apply(applyMsg interface{}) {
 		args := cmd.(*raft.InstallSnapshotArgs)
 		kv.readSnapshot(kv.persister.ReadSnapshot())
 		DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v, leaderId-term-index:%#v-%#v-%#v\n",
-			kv.rf.GetRaftInstanceName(), kv.db, args.ReqId, args.LeaderId, args.LastIncludedTerm, args.LastIncludedIndex)
+			kv.me, kv.db, args.ReqId, args.LeaderId, args.LastIncludedTerm, args.LastIncludedIndex)
 		kv.mu.Unlock()
 	default:
 		kv.trySnapshot(index)
@@ -315,7 +315,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.notices = make(map[int]*sync.Cond)
 	kv.appliedCmds = make(map[int]*appliedResult)
 	kv.readSnapshot(kv.persister.ReadSnapshot())
-	DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v\n", kv.rf.GetRaftInstanceName(), kv.db, -1)
+	DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v\n", kv.me, kv.db, -1)
 
 	// server loop
 	go func() {

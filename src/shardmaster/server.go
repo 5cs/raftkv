@@ -356,10 +356,18 @@ func (sm *ShardMaster) doJoin(index int, args JoinArgs) *appliedResult {
 	DPrintf("#args: %#v\n", args)
 	DPrintf("reshard(join): %#v, %#v, %#v\n", gids, gid2Shards, config.Shards)
 
+	// keys of loadMap
+	keys := make([]int, 0)
+	for k, _ := range loadMap {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+
 	for {
 		maxGid, minGid := nonZeroGid, nonZeroGid
 		maxLoad, minLoad := 0, 257
-		for gid, load := range loadMap {
+		for _, gid := range keys {
+			load := loadMap[gid]
 			if load > maxLoad {
 				maxGid, maxLoad = gid, load
 			}
@@ -650,9 +658,11 @@ func (sm *ShardMaster) Apply(applyMsg interface{}) {
 		sm.appliedCmds[index] = sm.doMove(index, cmd.(MoveArgs))
 	default:
 	}
-	sm.mu.Unlock()
 	if _, ok := sm.notices[index]; ok {
+		sm.mu.Unlock()
 		sm.notices[index].Broadcast()
+	} else {
+		sm.mu.Unlock()
 	}
 }
 

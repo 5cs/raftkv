@@ -18,7 +18,6 @@ package raft
 //
 
 import "bytes"
-import "fmt"
 import "log"
 import "math/rand"
 import "sync"
@@ -96,10 +95,6 @@ type Raft struct {
 	lastExcludedTerm       int
 }
 
-func (rf *Raft) GetRaftInstanceName() string {
-	return fmt.Sprintf("%v", rf.me)
-}
-
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -109,17 +104,9 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == LEADER
 }
 
-func (rf *Raft) GetStateNoLock() (int, bool) {
-	return rf.currentTerm, rf.state == LEADER
-}
-
 // Attach raft instance with upper applier App
 func (rf *Raft) SetApp(app app.Applier) {
 	rf.app = app
-}
-
-func (rf *Raft) GetLastApplied() int {
-	return rf.lastApplied
 }
 
 func (rf *Raft) GetLog() []LogEntry {
@@ -309,8 +296,10 @@ type AppendEntryReply struct {
 
 // AppendEntries RPC handler, given a term has at most one leader!
 func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
-	DPrintf("RPC:AppendEntries Callee id: %v term: %v Caller id: %v term: %v len: %v prevLogTerm %v prevLogIndex %v commitIndex %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, len(args.Entries), args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
-	defer DPrintf("=RPC:AppendEntries Callee id: %v term: %v Caller id: %v term: %v len: %v prevLogTerm %v prevLogIndex %v commitIndex %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, len(args.Entries), args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
+	DPrintf("RPC:AppendEntries Callee id: %v term: %v Caller id: %v term: %v len: %v prevLogTerm %v prevLogIndex %v commitIndex %v\n",
+		rf.me, rf.currentTerm, args.LeaderId, args.Term, len(args.Entries), args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
+	defer DPrintf("=RPC:AppendEntries Callee id: %v term: %v Caller id: %v term: %v len: %v prevLogTerm %v prevLogIndex %v commitIndex %v\n",
+		rf.me, rf.currentTerm, args.LeaderId, args.Term, len(args.Entries), args.PrevLogTerm, args.PrevLogIndex, args.LeaderCommit)
 
 	rf.mu.Lock()
 
@@ -425,8 +414,10 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	DPrintf("RPC:InstallSnapshot Callee id: %v term: %v Caller id: %v term: %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
-	defer DPrintf("=RPC:InstallSnapshot Callee id: %v term: %v Caller id: %v term: %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
+	DPrintf("RPC:InstallSnapshot Callee id: %v term: %v Caller id: %v term: %v\n",
+		rf.me, rf.currentTerm, args.LeaderId, args.Term)
+	defer DPrintf("=RPC:InstallSnapshot Callee id: %v term: %v Caller id: %v term: %v\n",
+		rf.me, rf.currentTerm, args.LeaderId, args.Term)
 
 	rf.mu.Lock()
 

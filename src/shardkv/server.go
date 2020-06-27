@@ -498,6 +498,8 @@ func (kv *ShardKV) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.config)
+	e.Encode(kv.delta.addDiff)
+	e.Encode(kv.delta.delDiff)
 	e.Encode(kv.lastIncludedIndex)
 	e.Encode(kv.lastIncludedTerm)
 	e.Encode(kv.clientSeqs)
@@ -515,6 +517,8 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 		lastIncludedIndex int = 0
 		lastIncludedTerm  int = 0
 		config                = shardmaster.Config{}
+		addDiff               = map[int][]int{}
+		delDiff               = map[int][]int{}
 	)
 	kv.db = [shardmaster.NShards]map[string]string{}
 	for shard := 0; shard < shardmaster.NShards; shard++ {
@@ -524,11 +528,18 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	d.Decode(&config)
+	d.Decode(&addDiff)
+	d.Decode(&delDiff)
 	d.Decode(&lastIncludedIndex)
 	d.Decode(&lastIncludedTerm)
 	d.Decode(&kv.clientSeqs)
 	d.Decode(&kv.db)
 	kv.config = config
+	kv.delta = DeltaConfig{
+		mu:      sync.Mutex{},
+		addDiff: addDiff,
+		delDiff: delDiff,
+	}
 	kv.lastIncludedIndex = lastIncludedIndex
 	kv.lastIncludedTerm = lastIncludedTerm
 }
@@ -652,11 +663,11 @@ func (kv *ShardKV) pullAndSyncShard(config shardmaster.Config) bool {
 			defer wg.Done()
 			kv.mu.Lock()
 			args := MigrateShardArgs{
-				Shards:    shard,
-				ConfigNum: oldConfigNum, // old config
-				ClientId:  kv.id,
-				Seq:       kv.seq,
-				Name:      kv.name,
+				Shards:     shard,
+				ConfigNum:  oldConfigNum, // old config
+				ClientId:   kv.id,
+				Seq:        kv.seq,
+				ClientName: kv.name,
 			}
 			kv.seq += 1
 			kv.mu.Unlock()
@@ -689,13 +700,18 @@ func (kv *ShardKV) pullAndSyncShard(config shardmaster.Config) bool {
 }
 
 func (kv *ShardKV) pollConfig(ms int) {
+	getCurrentConfigNum := func() int {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		return kv.config.Num
+	}
 	for {
 		select {
 		case <-time.After(time.Duration(ms) * time.Millisecond):
 			if _, isLeader := kv.rf.GetState(); isLeader {
 				latestConfig := kv.mck.Query(-1)
-				for i := kv.config.Num + 1; i <= latestConfig.Num; i++ {
-					newConfig := kv.mck.Query(i)
+				for getCurrentConfigNum() < latestConfig.Num {
+					newConfig := kv.mck.Query(getCurrentConfigNum() + 1)
 					if !kv.pullAndSyncShard(newConfig) {
 						break // repoll
 					}

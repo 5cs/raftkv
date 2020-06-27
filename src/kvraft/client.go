@@ -30,6 +30,18 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
+func (ck *Clerk) getLeader() int {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	return ck.leader
+}
+
+func (ck *Clerk) setNextLeader() {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.leader = (ck.leader + 1) % len(ck.servers)
+}
+
 //
 // fetch the current value for a key.
 // returns "" if the key does not exist.
@@ -48,14 +60,13 @@ func (ck *Clerk) Get(key string) string {
 	ck.seq += 1
 	getArgs := GetArgs{Key: key, ClientId: ck.id, Seq: ck.seq}
 	ck.mu.Unlock()
+
 	done := make(chan GetReply, 0)
 	go ck.tryGet(done, &getArgs)
 	for {
 		select {
 		case <-time.After(time.Duration(500 * time.Millisecond)):
-			ck.mu.Lock()
-			ck.leader = (ck.leader + 1) % len(ck.servers)
-			ck.mu.Unlock()
+			ck.setNextLeader()
 			go ck.tryGet(done, &getArgs)
 		case reply := <-done:
 			return reply.Value
@@ -64,14 +75,13 @@ func (ck *Clerk) Get(key string) string {
 }
 
 func (ck *Clerk) tryGet(done chan GetReply, args *GetArgs) {
+	leader := ck.getLeader()
 	reply := &GetReply{}
-	ck.servers[ck.leader].Call("KVServer.Get", args, reply)
+	ck.servers[leader].Call("KVServer.Get", args, reply)
 	if reply.Err == OK || reply.Err == ErrNoKey {
 		done <- *reply
 	} else if reply.WrongLeader {
-		ck.mu.Lock()
-		ck.leader = (ck.leader + 1) % len(ck.servers)
-		ck.mu.Unlock()
+		ck.setNextLeader()
 		go ck.tryGet(done, args)
 	}
 }
@@ -102,9 +112,7 @@ loop:
 	for {
 		select {
 		case <-time.After(time.Duration(500 * time.Millisecond)):
-			ck.mu.Lock()
-			ck.leader = (ck.leader + 1) % len(ck.servers)
-			ck.mu.Unlock()
+			ck.setNextLeader()
 			go ck.tryPutAppend(done, &putAppendArgs)
 		case <-done:
 			break loop
@@ -113,14 +121,13 @@ loop:
 }
 
 func (ck *Clerk) tryPutAppend(done chan struct{}, args *PutAppendArgs) {
+	leader := ck.getLeader()
 	reply := &PutAppendReply{}
-	ck.servers[ck.leader].Call("KVServer.PutAppend", args, reply)
+	ck.servers[leader].Call("KVServer.PutAppend", args, reply)
 	if reply.Err == OK || reply.Err == ErrNoKey {
 		done <- struct{}{}
 	} else if reply.WrongLeader {
-		ck.mu.Lock()
-		ck.leader = (ck.leader + 1) % len(ck.servers)
-		ck.mu.Unlock()
+		ck.setNextLeader()
 		go ck.tryPutAppend(done, args)
 	}
 }
