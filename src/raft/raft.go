@@ -833,6 +833,9 @@ func (rf *Raft) leaderLoop() {
 						args.PrevLogIndex = 0
 						args.PrevLogTerm = 0
 					} else if rf.nextIndex[i] >= 2 {
+						if rf.nextIndex[i] > rf.Len()+1 {
+							rf.nextIndex[i] = rf.Len() + 1
+						}
 						args.PrevLogIndex = rf.nextIndex[i] - 1
 						args.PrevLogTerm = rf.lastExcludedTerm
 						iPrevLogIndex := rf.Index(args.PrevLogIndex)

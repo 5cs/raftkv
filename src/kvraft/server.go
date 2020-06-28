@@ -160,52 +160,42 @@ func (kv *KVServer) Name() string {
 // Apply method for Raft
 func (kv *KVServer) Apply(applyMsg interface{}) {
 	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	msg := applyMsg.(*raft.ApplyMsg)
 	index := msg.CommandIndex
 	cmd := msg.Command
 	isLeader := msg.IsLeader
+	var (
+		key   string      = ""
+		reply interface{} = nil
+	)
 	switch cmd.(type) {
 	case GetArgs:
-		kv.trySnapshot(index)
-		if !isLeader {
-			kv.mu.Unlock()
-			break
-		}
 		args := cmd.(GetArgs)
-		reply := kv.get(&args, index, isLeader)
-		kv.appliedCmds[index] = &appliedResult{
-			Key:    getFmtKey(&args),
-			Result: reply,
-		}
-		if _, ok := kv.notices[index]; ok {
-			kv.mu.Unlock()
-			kv.notices[index].Broadcast()
-		} else {
-			kv.mu.Unlock()
-		}
+		key = getFmtKey(&args)
+		reply = kv.get(&args, index, isLeader)
 	case PutAppendArgs:
 		args := cmd.(PutAppendArgs)
-		reply := kv.putAppend(&args, index, isLeader)
-		kv.appliedCmds[index] = &appliedResult{
-			Key:    putAppendFmtKey(&args),
-			Result: reply,
-		}
-		kv.trySnapshot(index)
-		if _, ok := kv.notices[index]; ok {
-			kv.mu.Unlock()
-			kv.notices[index].Broadcast()
-		} else {
-			kv.mu.Unlock()
-		}
+		key = putAppendFmtKey(&args)
+		reply = kv.putAppend(&args, index, isLeader)
 	case *raft.InstallSnapshotArgs: // install snapshot
 		args := cmd.(*raft.InstallSnapshotArgs)
 		kv.readSnapshot(kv.persister.ReadSnapshot())
 		DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v, leaderId-term-index:%#v-%#v-%#v\n",
 			kv.me, kv.db, args.ReqId, args.LeaderId, args.LastIncludedTerm, args.LastIncludedIndex)
-		kv.mu.Unlock()
 	default:
+	}
+
+	if reply != nil {
 		kv.trySnapshot(index)
-		kv.mu.Unlock()
+		// send result
+		if _, ok := kv.notices[index]; ok {
+			kv.appliedCmds[index] = &appliedResult{
+				Key:    key,
+				Result: reply,
+			}
+			kv.notices[index].Broadcast()
+		}
 	}
 }
 

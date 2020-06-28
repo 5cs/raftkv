@@ -22,7 +22,8 @@ TestConcurrent1
 TestConcurrent2
 TestUnreliable1
 TestUnreliable2
-TestUnreliable3"
+TestUnreliable3
+TestChallenge1Concurrent"
 
 
 for test_case in $TEST_CASES; do

@@ -284,98 +284,58 @@ func (kv *ShardKV) Name() string {
 // Apply method called by Raft instance
 func (kv *ShardKV) Apply(applyMsg interface{}) {
 	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	msg := applyMsg.(*raft.ApplyMsg)
 	index := msg.CommandIndex
 	cmd := msg.Command
 	isLeader := msg.IsLeader
+	var (
+		key   string      = ""
+		reply interface{} = nil
+	)
 	switch cmd.(type) {
 	case GetArgs:
-		kv.trySnapshot(index)
-		if !isLeader {
-			kv.mu.Unlock()
-			break
-		}
 		args := cmd.(GetArgs)
-		reply := kv.get(&args, index, isLeader)
-		kv.appliedCmds[index] = &appliedResult{
-			Key:    kv.getFmtKey(&args),
-			Result: reply,
-		}
-		if _, ok := kv.notices[index]; ok {
-			kv.mu.Unlock()
-			kv.notices[index].Broadcast()
-		} else {
-			kv.mu.Unlock()
-		}
+		key = kv.getFmtKey(&args)
+		reply = kv.get(&args, index, isLeader)
 	case PutAppendArgs:
 		args := cmd.(PutAppendArgs)
-		reply := kv.putAppend(&args, index, isLeader)
-		kv.appliedCmds[index] = &appliedResult{
-			Key:    kv.putAppendFmtKey(&args),
-			Result: reply,
-		}
-		kv.trySnapshot(index)
-		if _, ok := kv.notices[index]; ok {
-			kv.mu.Unlock()
-			kv.notices[index].Broadcast()
-		} else {
-			kv.mu.Unlock()
-		}
+		key = kv.putAppendFmtKey(&args)
+		reply = kv.putAppend(&args, index, isLeader)
 	case *raft.InstallSnapshotArgs: // install snapshot
 		args := cmd.(*raft.InstallSnapshotArgs)
 		kv.readSnapshot(kv.persister.ReadSnapshot())
 		DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v, leaderId-term-index:%#v-%#v-%#v\n",
 			kv.name, kv.db, args.ReqId, args.LeaderId, args.LastIncludedTerm, args.LastIncludedIndex)
-		kv.mu.Unlock()
 	case SyncShardArgs:
 		args := cmd.(SyncShardArgs)
 		DPrintf("Op \"SyncShard\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-seq-name:%#v-%#v-%#v, get values: %#v\n",
 			kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.Seq, args.ClientName, args.Data)
-		reply := kv.syncShard(&args, index, isLeader)
-		kv.appliedCmds[index] = &appliedResult{
-			Key:    kv.syncShardFmtKey(&args),
-			Result: reply,
-		}
-		kv.trySnapshot(index)
-		if _, ok := kv.notices[index]; ok {
-			kv.mu.Unlock()
-			kv.notices[index].Broadcast()
-		} else {
-			kv.mu.Unlock()
-		}
+		key = kv.syncShardFmtKey(&args)
+		reply = kv.syncShard(&args, index, isLeader)
 	case MigrateShardArgs:
 		args := cmd.(MigrateShardArgs)
-		reply := kv.migrateShard(&args, index, isLeader)
-		kv.appliedCmds[index] = &appliedResult{
-			Key:    kv.migrateShardFmtKey(&args),
-			Result: reply,
-		}
-		kv.trySnapshot(index)
-		if _, ok := kv.notices[index]; ok {
-			kv.mu.Unlock()
-			kv.notices[index].Broadcast()
-		} else {
-			kv.mu.Unlock()
-		}
+		key = kv.migrateShardFmtKey(&args)
+		reply = kv.migrateShard(&args, index, isLeader)
 	case InstallConfigArgs:
 		args := cmd.(InstallConfigArgs)
 		DPrintf("Op \"InstallConfig\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-clientName:%#v-%#v\n",
 			kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.ClientName)
-		reply := kv.installConfig(&args, index, isLeader)
-		kv.appliedCmds[index] = &appliedResult{
-			Key:    kv.installConfigFmtKey(&args),
-			Result: reply,
-		}
-		kv.trySnapshot(index)
-		if _, ok := kv.notices[index]; ok {
-			kv.mu.Unlock()
-			kv.notices[index].Broadcast()
-		} else {
-			kv.mu.Unlock()
-		}
+		key = kv.installConfigFmtKey(&args)
+		reply = kv.installConfig(&args, index, isLeader)
 	default:
+	}
+
+	if reply != nil {
 		kv.trySnapshot(index)
-		kv.mu.Unlock()
+		// send result
+		if _, ok := kv.notices[index]; ok {
+			kv.appliedCmds[index] = &appliedResult{
+				Key:    key,
+				Result: reply,
+			}
+			kv.notices[index].Broadcast()
+		}
 	}
 }
 

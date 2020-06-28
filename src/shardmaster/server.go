@@ -643,10 +643,11 @@ func (sm *ShardMaster) Name() string {
 }
 
 func (sm *ShardMaster) Apply(applyMsg interface{}) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	msg := applyMsg.(*raft.ApplyMsg)
 	index := msg.CommandIndex
 	cmd := msg.Command
-	sm.mu.Lock()
 	switch cmd.(type) {
 	case QueryArgs:
 		sm.appliedCmds[index] = sm.doQuery(index, cmd.(QueryArgs))
@@ -659,10 +660,7 @@ func (sm *ShardMaster) Apply(applyMsg interface{}) {
 	default:
 	}
 	if _, ok := sm.notices[index]; ok {
-		sm.mu.Unlock()
 		sm.notices[index].Broadcast()
-	} else {
-		sm.mu.Unlock()
 	}
 }
 
