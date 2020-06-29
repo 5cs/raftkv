@@ -91,5 +91,6 @@ type InstallConfigArgs struct {
 }
 
 type InstallConfigReply struct {
-	Err Err
+	Err         Err
+	WrongLeader bool
 }

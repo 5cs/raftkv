@@ -530,11 +530,8 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := false
-
 	// Your code here (2B).
+	index, term, isLeader := -1, -1, false
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer func() {

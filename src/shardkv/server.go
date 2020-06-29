@@ -86,20 +86,11 @@ func (kv *ShardKV) installConfigFmtKey(args *InstallConfigArgs) string {
 	return fmt.Sprintf("%#v_%#v", args.ClientId, args.Config.Num)
 }
 
-func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.WrongLeader = true
-		return
-	}
-
-	cmd := *args
+func (kv *ShardKV) processCmd(cmd interface{}, fmtKey string) (interface{}, bool) {
 	for {
-		*reply = GetReply{}
 		index, _, isLeader := kv.rf.Start(cmd)
 		if !isLeader {
-			reply.WrongLeader = true
-			return
+			return nil, false
 		}
 
 		kv.mu.Lock()
@@ -109,26 +100,25 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		kv.notices[index].Wait()
 
 		ret := kv.appliedCmds[index]
-		k := kv.getFmtKey(args)
-		if ret.Key == k {
-			switch ret.Result.(type) {
-			case GetReply:
-				*reply = ret.Result.(GetReply)
-				kv.mu.Unlock()
-				return
-			default:
-			}
-		}
 		kv.mu.Unlock()
+		if ret.Key == fmtKey {
+			return ret.Result, true
+		}
+	}
+}
+
+func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
+	// Your code here.
+	cmd := *args
+	if res, isLeader := kv.processCmd(cmd, kv.getFmtKey(args)); !isLeader {
+		reply.WrongLeader = true
+	} else {
+		*reply = res.(GetReply)
 	}
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.WrongLeader = true
-		return
-	}
 	kv.mu.Lock()
 	if seq, ok := kv.clientSeqs[args.ClientId]; ok && args.Seq <= seq {
 		reply.Err = OK
@@ -138,42 +128,15 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Unlock()
 
 	cmd := *args
-	for {
-		*reply = PutAppendReply{}
-		index, _, isLeader := kv.rf.Start(cmd)
-		if !isLeader {
-			reply.WrongLeader = true
-			return
-		}
-
-		kv.mu.Lock()
-		if _, ok := kv.notices[index]; !ok {
-			kv.notices[index] = sync.NewCond(&kv.mu)
-		}
-		kv.notices[index].Wait()
-
-		ret := kv.appliedCmds[index]
-		k := kv.putAppendFmtKey(args)
-		if ret.Key == k {
-			switch ret.Result.(type) {
-			case PutAppendReply:
-				*reply = ret.Result.(PutAppendReply)
-				kv.mu.Unlock()
-				return
-			default:
-			}
-		}
-		kv.mu.Unlock()
+	if res, isLeader := kv.processCmd(cmd, kv.putAppendFmtKey(args)); !isLeader {
+		reply.WrongLeader = true
+	} else {
+		*reply = res.(PutAppendReply)
 	}
 }
 
 // RPC handle for migrating shard
 func (kv *ShardKV) MigrateShard(args *MigrateShardArgs, reply *MigrateShardReply) {
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.WrongLeader = true
-		return
-	}
-
 	kv.mu.Lock()
 	if args.ConfigNum > kv.config.Num {
 		reply.Err = ErrNoKey
@@ -184,33 +147,11 @@ func (kv *ShardKV) MigrateShard(args *MigrateShardArgs, reply *MigrateShardReply
 
 	// agree on deleted shard
 	cmd := *args
-loop:
-	for {
-		*reply = MigrateShardReply{}
-		index, _, isLeader := kv.rf.Start(cmd)
-		if !isLeader {
-			reply.WrongLeader = true
-			return
-		}
-
-		kv.mu.Lock()
-		if _, ok := kv.notices[index]; !ok {
-			kv.notices[index] = sync.NewCond(&kv.mu)
-		}
-		kv.notices[index].Wait()
-
-		ret := kv.appliedCmds[index]
-		k := kv.migrateShardFmtKey(args)
-		if ret.Key == k {
-			switch ret.Result.(type) {
-			case MigrateShardReply:
-				*reply = ret.Result.(MigrateShardReply)
-				kv.mu.Unlock()
-				break loop
-			default:
-			}
-		}
-		kv.mu.Unlock()
+	if res, isLeader := kv.processCmd(cmd, kv.migrateShardFmtKey(args)); !isLeader {
+		reply.WrongLeader = true
+		return
+	} else {
+		*reply = res.(MigrateShardReply)
 	}
 
 	kv.mu.Lock()
@@ -233,10 +174,6 @@ loop:
 }
 
 func (kv *ShardKV) SyncShard(args *SyncShardArgs, reply *SyncShardReply) {
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.WrongLeader = true
-		return
-	}
 	kv.mu.Lock()
 	if seq, ok := kv.clientSeqs[args.ClientId]; ok && args.Seq <= seq {
 		reply.Err = OK
@@ -246,39 +183,20 @@ func (kv *ShardKV) SyncShard(args *SyncShardArgs, reply *SyncShardReply) {
 	kv.mu.Unlock()
 
 	cmd := *args
-	for {
-		*reply = SyncShardReply{}
-		index, _, isLeader := kv.rf.Start(cmd)
-		if !isLeader {
-			reply.WrongLeader = true
-			return
-		}
-
-		kv.mu.Lock()
-		if _, ok := kv.notices[index]; !ok {
-			kv.notices[index] = sync.NewCond(&kv.mu)
-		}
-		DPrintf("Op \"SyncShard\" %#v wait, index:%#v, isLeader: %#v\n", kv.name, index, isLeader)
-		kv.notices[index].Wait()
-		DPrintf("Op \"SyncShard\" %#v wake, index:%#v, isLeader: %#v\n", kv.name, index, isLeader)
-
-		ret := kv.appliedCmds[index]
-		k := kv.syncShardFmtKey(args)
-		if ret.Key == k {
-			switch ret.Result.(type) {
-			case SyncShardReply:
-				*reply = ret.Result.(SyncShardReply)
-				kv.mu.Unlock()
-				return
-			default:
-			}
-		}
-		kv.mu.Unlock()
+	if res, isLeader := kv.processCmd(cmd, kv.syncShardFmtKey(args)); !isLeader {
+		reply.WrongLeader = true
+	} else {
+		*reply = res.(SyncShardReply)
 	}
 }
 
-func (kv *ShardKV) Name() string {
-	return kv.name
+func (kv *ShardKV) InstallConfig(args *InstallConfigArgs, reply *InstallConfigReply) {
+	cmd := *args
+	if res, isLeader := kv.processCmd(cmd, kv.installConfigFmtKey(args)); !isLeader {
+		reply.WrongLeader = true
+	} else {
+		*reply = res.(InstallConfigReply)
+	}
 }
 
 // Apply method called by Raft instance
@@ -288,7 +206,6 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 	msg := applyMsg.(*raft.ApplyMsg)
 	index := msg.CommandIndex
 	cmd := msg.Command
-	isLeader := msg.IsLeader
 	var (
 		key   string      = ""
 		reply interface{} = nil
@@ -296,33 +213,21 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 	switch cmd.(type) {
 	case GetArgs:
 		args := cmd.(GetArgs)
-		key = kv.getFmtKey(&args)
-		reply = kv.get(&args, index, isLeader)
+		key, reply = kv.getFmtKey(&args), kv.get(&args)
 	case PutAppendArgs:
 		args := cmd.(PutAppendArgs)
-		key = kv.putAppendFmtKey(&args)
-		reply = kv.putAppend(&args, index, isLeader)
-	case *raft.InstallSnapshotArgs: // install snapshot
-		args := cmd.(*raft.InstallSnapshotArgs)
-		kv.readSnapshot(kv.persister.ReadSnapshot())
-		DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v, leaderId-term-index:%#v-%#v-%#v\n",
-			kv.name, kv.db, args.ReqId, args.LeaderId, args.LastIncludedTerm, args.LastIncludedIndex)
+		key, reply = kv.putAppendFmtKey(&args), kv.putAppend(&args)
 	case SyncShardArgs:
 		args := cmd.(SyncShardArgs)
-		DPrintf("Op \"SyncShard\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-seq-name:%#v-%#v-%#v, get values: %#v\n",
-			kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.Seq, args.ClientName, args.Data)
-		key = kv.syncShardFmtKey(&args)
-		reply = kv.syncShard(&args, index, isLeader)
+		key, reply = kv.syncShardFmtKey(&args), kv.syncShard(&args)
 	case MigrateShardArgs:
 		args := cmd.(MigrateShardArgs)
-		key = kv.migrateShardFmtKey(&args)
-		reply = kv.migrateShard(&args, index, isLeader)
+		key, reply = kv.migrateShardFmtKey(&args), kv.migrateShard(&args)
 	case InstallConfigArgs:
 		args := cmd.(InstallConfigArgs)
-		DPrintf("Op \"InstallConfig\" at %#v, kv.configNum-arg.config:%#v-%#v, clientId-clientName:%#v-%#v\n",
-			kv.name, kv.config.Num, args.Config.Num, args.ClientId, args.ClientName)
-		key = kv.installConfigFmtKey(&args)
-		reply = kv.installConfig(&args, index, isLeader)
+		key, reply = kv.installConfigFmtKey(&args), kv.installConfig(&args)
+	case *raft.InstallSnapshotArgs: // install snapshot
+		kv.readSnapshot(kv.persister.ReadSnapshot())
 	default:
 	}
 
@@ -339,7 +244,12 @@ func (kv *ShardKV) Apply(applyMsg interface{}) {
 	}
 }
 
-func (kv *ShardKV) get(args *GetArgs, index int, isLeader bool) GetReply {
+// Interface of app, used by Raft instance for debugging
+func (kv *ShardKV) Name() string {
+	return kv.name
+}
+
+func (kv *ShardKV) get(args *GetArgs) GetReply {
 	if kv.config.Shards[key2shard(args.Key)] != kv.gid {
 		return GetReply{Value: "", Err: ErrWrongGroup}
 	}
@@ -350,7 +260,7 @@ func (kv *ShardKV) get(args *GetArgs, index int, isLeader bool) GetReply {
 	}
 }
 
-func (kv *ShardKV) putAppend(args *PutAppendArgs, index int, isLeader bool) PutAppendReply {
+func (kv *ShardKV) putAppend(args *PutAppendArgs) PutAppendReply {
 	if !(kv.config.Num == args.ConfigNum && kv.config.Shards[key2shard(args.Key)] == kv.gid) {
 		return PutAppendReply{Err: ErrWrongGroup}
 	}
@@ -365,6 +275,7 @@ func (kv *ShardKV) putAppend(args *PutAppendArgs, index int, isLeader bool) PutA
 		}
 	}
 	kv.delta.mu.Unlock()
+
 	if seq, ok := kv.clientSeqs[args.ClientId]; ok && seq >= args.Seq {
 		return PutAppendReply{Err: OK}
 	}
@@ -377,7 +288,7 @@ func (kv *ShardKV) putAppend(args *PutAppendArgs, index int, isLeader bool) PutA
 	return PutAppendReply{Err: OK}
 }
 
-func (kv *ShardKV) syncShard(args *SyncShardArgs, index int, isLeader bool) SyncShardReply {
+func (kv *ShardKV) syncShard(args *SyncShardArgs) SyncShardReply {
 	if args.Config.Num <= kv.config.Num {
 		return SyncShardReply{Err: OK, WrongLeader: false}
 	}
@@ -413,7 +324,7 @@ loop:
 	return SyncShardReply{Err: OK, WrongLeader: false}
 }
 
-func (kv *ShardKV) migrateShard(args *MigrateShardArgs, index int, isLeader bool) MigrateShardReply {
+func (kv *ShardKV) migrateShard(args *MigrateShardArgs) MigrateShardReply {
 	kv.delta.mu.Lock()
 	if _, ok := kv.delta.delDiff[args.ConfigNum]; !ok {
 		kv.delta.delDiff[args.ConfigNum] = []int{}
@@ -432,41 +343,13 @@ loop:
 	return MigrateShardReply{}
 }
 
-func (kv *ShardKV) installConfig(args *InstallConfigArgs, index int, isLeader bool) InstallConfigReply {
+func (kv *ShardKV) installConfig(args *InstallConfigArgs) InstallConfigReply {
 	if args.Config.Num-1 == kv.config.Num {
 		kv.config = args.Config
 	} else {
 		// panic("what?")
 	}
 	return InstallConfigReply{Err: OK}
-}
-
-func (kv *ShardKV) trySnapshot(index int) {
-	if !(kv.maxraftstate != -1 &&
-		float64(kv.persister.RaftStateSize()) >= float64(kv.maxraftstate)*0.8) {
-		return
-	}
-
-	logs := kv.rf.GetLog()
-	kv.lastIncludedIndex = index
-	kv.lastIncludedTerm = logs[kv.rf.Index(index)].Term
-	kv.persist()
-	return
-}
-
-func (kv *ShardKV) persist() {
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(kv.config)
-	e.Encode(kv.delta.addDiff)
-	e.Encode(kv.delta.delDiff)
-	e.Encode(kv.lastIncludedIndex)
-	e.Encode(kv.lastIncludedTerm)
-	e.Encode(kv.clientSeqs)
-	e.Encode(kv.db)
-	data := w.Bytes()
-	kv.persister.SaveSnapshot(data)
-	kv.rf.TruncateLog(kv.lastIncludedIndex)
 }
 
 func (kv *ShardKV) readSnapshot(data []byte) {
@@ -502,6 +385,34 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	}
 	kv.lastIncludedIndex = lastIncludedIndex
 	kv.lastIncludedTerm = lastIncludedTerm
+}
+
+func (kv *ShardKV) trySnapshot(index int) {
+	if !(kv.maxraftstate != -1 &&
+		float64(kv.persister.RaftStateSize()) >= float64(kv.maxraftstate)*0.8) {
+		return
+	}
+
+	logs := kv.rf.GetLog()
+	kv.lastIncludedIndex = index
+	kv.lastIncludedTerm = logs[kv.rf.Index(index)].Term
+	kv.persist()
+	return
+}
+
+func (kv *ShardKV) persist() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.config)
+	e.Encode(kv.delta.addDiff)
+	e.Encode(kv.delta.delDiff)
+	e.Encode(kv.lastIncludedIndex)
+	e.Encode(kv.lastIncludedTerm)
+	e.Encode(kv.clientSeqs)
+	e.Encode(kv.db)
+	data := w.Bytes()
+	kv.persister.SaveSnapshot(data)
+	kv.rf.TruncateLog(kv.lastIncludedIndex)
 }
 
 func (kv *ShardKV) sendMigrateShard(server string, args *MigrateShardArgs, reply *MigrateShardReply) bool {
@@ -617,13 +528,12 @@ func (kv *ShardKV) pullAndSyncShard(config shardmaster.Config) bool {
 
 	var wg sync.WaitGroup
 	for k := range gidToShards {
-		gid, shard := k, gidToShards[k] // local variable for goroutine
 		wg.Add(1)
-		go func(wg *sync.WaitGroup) {
+		go func(gid int, shards []int) {
 			defer wg.Done()
 			kv.mu.Lock()
 			args := MigrateShardArgs{
-				Shards:     shard,
+				Shards:     shards,
 				ConfigNum:  oldConfigNum, // old config
 				ClientId:   kv.id,
 				Seq:        kv.seq,
@@ -646,7 +556,7 @@ func (kv *ShardKV) pullAndSyncShard(config shardmaster.Config) bool {
 					syncShardArgs.ClientSeqs[clientId] = seq
 				}
 			}
-		}(&wg)
+		}(k, gidToShards[k])
 	}
 	wg.Wait()
 
@@ -655,6 +565,46 @@ func (kv *ShardKV) pullAndSyncShard(config shardmaster.Config) bool {
 	kv.SyncShard(&syncShardArgs, &syncShardReply)
 	if syncShardReply.WrongLeader {
 		return false
+	}
+	return true
+}
+
+func (kv *ShardKV) checkAndInstallNewConfig(config shardmaster.Config) bool {
+	kv.mu.Lock()
+	shardNeedToAdd, shardNeedToDel := kv.calcDiff(config)
+	checkIsNotReady := func(diff []int, shards map[int]bool) bool {
+		kv.delta.mu.Lock()
+		defer kv.delta.mu.Unlock()
+		mustCnt, hasCnt := 0, 0
+		for shard, _ := range shards {
+			mustCnt += 1
+			for _, shard1 := range diff {
+				if shard == shard1 {
+					hasCnt += 1
+					break
+				}
+			}
+		}
+		return mustCnt != hasCnt
+	}
+	if (checkIsNotReady(kv.delta.addDiff[kv.config.Num], shardNeedToAdd) ||
+		checkIsNotReady(kv.delta.delDiff[kv.config.Num], shardNeedToDel)) && kv.config.Num != 0 {
+		kv.mu.Unlock()
+		return false
+	}
+	kv.mu.Unlock()
+
+	// leader proposes new config
+	args := &InstallConfigArgs{
+		Config:     config,
+		ClientId:   kv.id,
+		ClientName: kv.name,
+	}
+	reply := &InstallConfigReply{}
+	kv.InstallConfig(args, reply)
+
+	if reply.WrongLeader {
+		return false // reinstall by new term's leader
 	}
 	return true
 }
@@ -681,73 +631,6 @@ func (kv *ShardKV) pollConfig(ms int) {
 				}
 			}
 		}
-	}
-}
-
-func (kv *ShardKV) checkAndInstallNewConfig(config shardmaster.Config) bool {
-	kv.mu.Lock()
-	shardNeedToAdd, shardNeedToDel := kv.calcDiff(config)
-	checkIsNotReady := func(shards []int, diff map[int]bool) bool {
-		kv.delta.mu.Lock()
-		defer kv.delta.mu.Unlock()
-		mustCnt, hasCnt := 0, 0
-		for shard, _ := range diff {
-			mustCnt += 1
-			for _, shard1 := range shards {
-				if shard == shard1 {
-					hasCnt += 1
-					break
-				}
-			}
-		}
-		return mustCnt != hasCnt
-	}
-	if (checkIsNotReady(kv.delta.addDiff[kv.config.Num], shardNeedToAdd) ||
-		checkIsNotReady(kv.delta.delDiff[kv.config.Num], shardNeedToDel)) && kv.config.Num != 0 {
-		kv.mu.Unlock()
-		return false
-	}
-	kv.mu.Unlock()
-
-	// leader proposes new config
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		return false // reinstall by leader of another term
-	}
-	cmd := InstallConfigArgs{
-		Config:     config,
-		ClientId:   kv.id,
-		ClientName: kv.name,
-	}
-	reply := &InstallConfigReply{
-		Err: OK,
-	}
-	for {
-		*reply = InstallConfigReply{}
-		index, _, isLeader := kv.rf.Start(cmd)
-		if !isLeader {
-			return false // reinstall by another leader
-		}
-
-		kv.mu.Lock()
-		if _, ok := kv.notices[index]; !ok {
-			kv.notices[index] = sync.NewCond(&kv.mu)
-		}
-		DPrintf("Op \"InstallConfig\", %#v wait, index:%#v, isLeader: %#v\n", kv.name, index, isLeader)
-		kv.notices[index].Wait()
-		DPrintf("Op \"InstallConfig\", %#v wake, index:%#v, isLeader: %#v\n", kv.name, index, isLeader)
-
-		ret := kv.appliedCmds[index]
-		k := kv.installConfigFmtKey(&cmd)
-		if ret.Key == k {
-			switch ret.Result.(type) {
-			case InstallConfigReply:
-				*reply = ret.Result.(InstallConfigReply)
-				kv.mu.Unlock()
-				return true // installed
-			default:
-			}
-		}
-		kv.mu.Unlock()
 	}
 }
 

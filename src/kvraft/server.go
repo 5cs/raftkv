@@ -1,7 +1,6 @@
 package raftkv
 
 import (
-	// "helper" // Applier interface
 	"bytes"
 	"fmt"
 	"labgob"
@@ -9,7 +8,6 @@ import (
 	"log"
 	"raft"
 	"sync"
-	// "time"
 )
 
 const Debug = 0
@@ -54,28 +52,19 @@ type appliedResult struct {
 	Result interface{}
 }
 
-func getFmtKey(args *GetArgs) string {
+func (kv *KVServer) getFmtKey(args *GetArgs) string {
 	return fmt.Sprintf("%v_%v_%v", args.Key, args.ClientId, args.Seq)
 }
 
-func putAppendFmtKey(args *PutAppendArgs) string {
+func (kv *KVServer) putAppendFmtKey(args *PutAppendArgs) string {
 	return fmt.Sprintf("%v_%v_%v", args.Key, args.ClientId, args.Seq)
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.WrongLeader = true
-		return
-	}
-
-	cmd := *args
+func (kv *KVServer) processCmd(cmd interface{}, fmtKey string) (interface{}, bool) {
 	for {
-		*reply = GetReply{}
 		index, _, isLeader := kv.rf.Start(cmd)
 		if !isLeader {
-			reply.WrongLeader = true
-			return
+			return nil, false
 		}
 
 		kv.mu.Lock()
@@ -85,26 +74,25 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.notices[index].Wait()
 
 		ret := kv.appliedCmds[index]
-		k := getFmtKey(&cmd)
-		if ret.Key == k {
-			switch ret.Result.(type) {
-			case GetReply:
-				*reply = ret.Result.(GetReply)
-				kv.mu.Unlock()
-				return
-			default:
-			}
-		}
 		kv.mu.Unlock()
+		if ret.Key == fmtKey {
+			return ret.Result, true
+		}
+	}
+}
+
+func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	// Your code here.
+	cmd := *args
+	if res, isLeader := kv.processCmd(cmd, kv.getFmtKey(args)); !isLeader {
+		reply.WrongLeader = true
+	} else {
+		*reply = res.(GetReply)
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.WrongLeader = true
-		return
-	}
 	kv.mu.Lock()
 	if seq, ok := kv.clientSeqs[args.ClientId]; ok && args.Seq <= seq {
 		reply.Err = OK
@@ -112,33 +100,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return // applied
 	}
 	kv.mu.Unlock()
+
 	cmd := *args
-	for {
-		*reply = PutAppendReply{}
-		index, _, isLeader := kv.rf.Start(cmd)
-		if !isLeader {
-			reply.WrongLeader = true
-			return
-		}
-
-		kv.mu.Lock()
-		if _, ok := kv.notices[index]; !ok {
-			kv.notices[index] = sync.NewCond(&kv.mu)
-		}
-		kv.notices[index].Wait()
-
-		ret := kv.appliedCmds[index]
-		k := putAppendFmtKey(&cmd)
-		if ret.Key == k {
-			switch ret.Result.(type) {
-			case PutAppendReply:
-				*reply = ret.Result.(PutAppendReply)
-				kv.mu.Unlock()
-				return
-			default:
-			}
-		}
-		kv.mu.Unlock()
+	if res, isLeader := kv.processCmd(cmd, kv.putAppendFmtKey(args)); !isLeader {
+		reply.WrongLeader = true
+	} else {
+		*reply = res.(PutAppendReply)
 	}
 }
 
@@ -164,7 +131,6 @@ func (kv *KVServer) Apply(applyMsg interface{}) {
 	msg := applyMsg.(*raft.ApplyMsg)
 	index := msg.CommandIndex
 	cmd := msg.Command
-	isLeader := msg.IsLeader
 	var (
 		key   string      = ""
 		reply interface{} = nil
@@ -172,17 +138,12 @@ func (kv *KVServer) Apply(applyMsg interface{}) {
 	switch cmd.(type) {
 	case GetArgs:
 		args := cmd.(GetArgs)
-		key = getFmtKey(&args)
-		reply = kv.get(&args, index, isLeader)
+		key, reply = kv.getFmtKey(&args), kv.get(&args)
 	case PutAppendArgs:
 		args := cmd.(PutAppendArgs)
-		key = putAppendFmtKey(&args)
-		reply = kv.putAppend(&args, index, isLeader)
+		key, reply = kv.putAppendFmtKey(&args), kv.putAppend(&args)
 	case *raft.InstallSnapshotArgs: // install snapshot
-		args := cmd.(*raft.InstallSnapshotArgs)
 		kv.readSnapshot(kv.persister.ReadSnapshot())
-		DPrintf("Op \"InstallSnapshot\" at %#v, get values: %#v, reqId: %#v, leaderId-term-index:%#v-%#v-%#v\n",
-			kv.me, kv.db, args.ReqId, args.LeaderId, args.LastIncludedTerm, args.LastIncludedIndex)
 	default:
 	}
 
@@ -197,6 +158,47 @@ func (kv *KVServer) Apply(applyMsg interface{}) {
 			kv.notices[index].Broadcast()
 		}
 	}
+}
+
+func (kv *KVServer) get(args *GetArgs) GetReply {
+	if value, ok := kv.db[args.Key]; !ok {
+		return GetReply{Value: "", Err: ErrNoKey}
+	} else {
+		return GetReply{Value: value, Err: OK}
+	}
+}
+
+func (kv *KVServer) putAppend(args *PutAppendArgs) PutAppendReply {
+	if seq, ok := kv.clientSeqs[args.ClientId]; ok && seq >= args.Seq {
+		return PutAppendReply{Err: OK}
+	}
+	kv.clientSeqs[args.ClientId] = args.Seq
+	if args.Op == "Put" {
+		kv.db[args.Key] = args.Value
+	} else {
+		kv.db[args.Key] += args.Value
+	}
+	return PutAppendReply{Err: OK}
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	var (
+		lastIncludedIndex int = 0
+		lastIncludedTerm  int = 0
+	)
+	kv.db = make(map[string]string)
+	kv.clientSeqs = make(map[int64]int64)
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	d.Decode(&lastIncludedIndex)
+	d.Decode(&lastIncludedTerm)
+	d.Decode(&kv.clientSeqs)
+	d.Decode(&kv.db)
+	kv.lastIncludedIndex = lastIncludedIndex
+	kv.lastIncludedTerm = lastIncludedTerm
 }
 
 func (kv *KVServer) trySnapshot(index int) {
@@ -222,47 +224,6 @@ func (kv *KVServer) persist() {
 	data := w.Bytes()
 	kv.persister.SaveSnapshot(data)
 	kv.rf.TruncateLog(kv.lastIncludedIndex)
-}
-
-func (kv *KVServer) readSnapshot(data []byte) {
-	if data == nil || len(data) < 1 {
-		return
-	}
-	var (
-		lastIncludedIndex int = 0
-		lastIncludedTerm  int = 0
-	)
-	kv.db = make(map[string]string)
-	kv.clientSeqs = make(map[int64]int64)
-	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
-	d.Decode(&lastIncludedIndex)
-	d.Decode(&lastIncludedTerm)
-	d.Decode(&kv.clientSeqs)
-	d.Decode(&kv.db)
-	kv.lastIncludedIndex = lastIncludedIndex
-	kv.lastIncludedTerm = lastIncludedTerm
-}
-
-func (kv *KVServer) putAppend(args *PutAppendArgs, index int, isLeader bool) PutAppendReply {
-	if seq, ok := kv.clientSeqs[args.ClientId]; ok && seq >= args.Seq {
-		return PutAppendReply{Err: OK}
-	}
-	kv.clientSeqs[args.ClientId] = args.Seq
-	if args.Op == "Put" {
-		kv.db[args.Key] = args.Value
-	} else {
-		kv.db[args.Key] += args.Value
-	}
-	return PutAppendReply{Err: OK}
-}
-
-func (kv *KVServer) get(args *GetArgs, index int, isLeader bool) GetReply {
-	if value, ok := kv.db[args.Key]; !ok {
-		return GetReply{Value: "", Err: ErrNoKey}
-	} else {
-		return GetReply{Value: value, Err: OK}
-	}
 }
 
 //
