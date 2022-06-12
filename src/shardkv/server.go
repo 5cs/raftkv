@@ -1,10 +1,10 @@
 package shardkv
 
-import "shardmaster"
-import "labrpc"
-import "raft"
+import "raftkv/shardmaster"
+import "raftkv/labrpc"
+import "raftkv/raft"
 import "sync"
-import "labgob"
+import "raftkv/labgob"
 import "fmt"
 import "log"
 import "time"

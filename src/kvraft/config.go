@@ -1,6 +1,6 @@
 package raftkv
 
-import "labrpc"
+import "raftkv/labrpc"
 import "testing"
 import "os"
 
@@ -11,7 +11,7 @@ import "math/rand"
 import "encoding/base64"
 import "sync"
 import "runtime"
-import "raft"
+import "raftkv/raft"
 import "fmt"
 import "time"
 import "sync/atomic"

@@ -3,10 +3,10 @@ package raftkv
 import (
 	"bytes"
 	"fmt"
-	"labgob"
-	"labrpc"
+	"raftkv/labgob"
+	"raftkv/labrpc"
 	"log"
-	"raft"
+	"raftkv/raft"
 	"sync"
 )
 

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"mapreduce"
+	"raftkv/mapreduce"
 	"os"
   "strings"
   "unicode"

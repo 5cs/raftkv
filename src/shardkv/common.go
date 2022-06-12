@@ -1,6 +1,6 @@
 package shardkv
 
-import "shardmaster"
+import "raftkv/shardmaster"
 
 //
 // Sharded key/value server.

@@ -1,9 +1,9 @@
 package shardmaster
 
-import "raft"
-import "labrpc"
+import "raftkv/raft"
+import "raftkv/labrpc"
 import "sync"
-import "labgob"
+import "raftkv/labgob"
 import "fmt"
 import "log"
 import "sort"
