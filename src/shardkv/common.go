@@ -88,6 +88,7 @@ type InstallConfigArgs struct {
 	Config     shardmaster.Config
 	ClientId   int64
 	ClientName string
+	DeletedShards map[int]bool
 }
 
 type InstallConfigReply struct {

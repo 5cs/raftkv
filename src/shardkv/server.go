@@ -346,6 +346,9 @@ loop:
 func (kv *ShardKV) installConfig(args *InstallConfigArgs) InstallConfigReply {
 	if args.Config.Num-1 == kv.config.Num {
 		kv.config = args.Config
+		for shard, _ := range args.DeletedShards {
+			kv.db[shard] = make(map[string]string)
+		}
 	} else {
 		// panic("what?")
 	}
@@ -599,6 +602,7 @@ func (kv *ShardKV) checkAndInstallNewConfig(config shardmaster.Config) bool {
 		Config:     config,
 		ClientId:   kv.id,
 		ClientName: kv.name,
+		DeletedShards: shardNeedToDel,
 	}
 	reply := &InstallConfigReply{}
 	kv.InstallConfig(args, reply)
