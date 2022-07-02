@@ -162,7 +162,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			return
 		}
 	}
-	return
 }
 
 func (ck *Clerk) tryPutAppend(done chan PutAppendReply, args *PutAppendArgs) {

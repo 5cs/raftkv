@@ -266,7 +266,6 @@ type AppendEntryArgs struct {
 	PrevLogTerm  int
 	Entries      []LogEntry
 	LeaderCommit int
-	ReqId        int64
 }
 
 type AppendEntryReply struct {
@@ -384,7 +383,6 @@ type InstallSnapshotArgs struct {
 	LeaderId          int
 	LastIncludedIndex int
 	LastIncludedTerm  int
-	ReqId             int64
 	Data              []byte
 }
 
@@ -691,8 +689,8 @@ func (rf *Raft) candidateLoop(timeOut chan struct{}) int {
 	}
 
 	var (
-		yes                   int  = 1
-		no                    int  = 0
+		yes int = 1
+		no  int = 0
 	)
 	for {
 		select {
@@ -771,7 +769,6 @@ func (rf *Raft) leaderLoop() {
 						installSnapshotArgs.LeaderId = rf.me
 						installSnapshotArgs.LastIncludedIndex = rf.lastExcludedIndex
 						installSnapshotArgs.LastIncludedTerm = rf.lastExcludedTerm
-						installSnapshotArgs.ReqId = nrand()
 						installSnapshotArgs.Data = rf.persister.ReadSnapshot()
 						rf.mu.Unlock()
 						rf.sendInstallSnapshot(i, installSnapshotArgs, installSnapshotReply)
@@ -791,7 +788,6 @@ func (rf *Raft) leaderLoop() {
 						Term:         currentTerm,
 						LeaderId:     rf.me,
 						LeaderCommit: rf.commitIndex,
-						ReqId:        nrand(),
 					}
 					if rf.nextIndex[i] == 1 {
 						args.PrevLogIndex = 0

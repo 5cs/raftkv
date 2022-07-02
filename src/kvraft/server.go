@@ -44,7 +44,6 @@ type KVServer struct {
 	appliedCmds       map[int]*appliedResult
 	lastIncludedIndex int
 	lastIncludedTerm  int
-	restart           bool
 }
 
 type appliedResult struct {
